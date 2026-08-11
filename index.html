@@ -163,6 +163,20 @@
     color: var(--text-dim);
     margin-top: 8px;
   }
+  /* Links to a player's Baseball Savant page — used wherever a player name
+     is rendered (leaderboards, matchup tables, percentile/expected-stats
+     tables, prospects, etc). Deliberately styled to inherit the
+     surrounding text color rather than looking like a typical blue web
+     link, since these are sprinkled densely through dense stat tables. */
+  a.player-link {
+    color: inherit;
+    text-decoration: none;
+    border-bottom: 1px dotted var(--text-dim);
+  }
+  a.player-link:hover {
+    color: var(--accent, #4da3ff);
+    border-bottom-color: var(--accent, #4da3ff);
+  }
   .batter-lb-wrap {
     max-width: 1100px;
     margin: 0 auto;
@@ -1124,6 +1138,24 @@
     return `https://www.mlbstatic.com/team-logos/${teamId}.svg`;
   }
 
+  // Baseball Savant resolves a player's page from just their numeric MLB
+  // person/player ID with no name-slug required — confirmed live
+  // (https://baseballsavant.mlb.com/savant-player/545361 correctly loads
+  // Mike Trout's page) — so every place in this file that already has an
+  // MLB player ID sitting next to a rendered name can link straight to it
+  // with no extra lookup. Falls back to plain (unlinked) text if the ID is
+  // missing, so this is always safe to call even on partial data.
+  function savantPlayerLink(id, name, opts) {
+    if (id == null || id === '') return name;
+    const { extraClass, stopPropagation } = opts || {};
+    const cls = `player-link${extraClass ? ' ' + extraClass : ''}`;
+    // stopPropagation is for names rendered inside a <summary> (the bullpen
+    // pitcher toggles) — without it, clicking the link also bubbles up and
+    // toggles the collapsible <details> panel open/closed underneath it.
+    const click = stopPropagation ? ' onclick="event.stopPropagation()"' : '';
+    return `<a href="https://baseballsavant.mlb.com/savant-player/${id}" target="_blank" rel="noopener" class="${cls}"${click}>${name}</a>`;
+  }
+
   function statusInfo(game) {
     const abstract = game.status.abstractGameState; // Preview, Live, Final
     const detailed = game.status.detailedState;
@@ -1664,7 +1696,7 @@
           if (!p.person) return;
           const b = p.stats && p.stats.batting;
           if (b && Object.keys(b).length > 0) {
-            const cur = battingTotals.get(p.person.id) || { name: p.person.fullName, teamAbbr, hits: 0, rbi: 0, hr: 0, sb: 0, doubles: 0, triples: 0 };
+            const cur = battingTotals.get(p.person.id) || { id: p.person.id, name: p.person.fullName, teamAbbr, hits: 0, rbi: 0, hr: 0, sb: 0, doubles: 0, triples: 0 };
             cur.hits += num(b.hits);
             cur.rbi += num(b.rbi);
             cur.hr += num(b.homeRuns);
@@ -1675,7 +1707,7 @@
           }
           const pit = p.stats && p.stats.pitching;
           if (pit && Object.keys(pit).length > 0) {
-            const cur = pitchingTotals.get(p.person.id) || { name: p.person.fullName, teamAbbr, so: 0, whiffs: 0 };
+            const cur = pitchingTotals.get(p.person.id) || { id: p.person.id, name: p.person.fullName, teamAbbr, so: 0, whiffs: 0 };
             cur.so += num(pit.strikeOuts);
             pitchingTotals.set(p.person.id, cur);
 
@@ -1709,6 +1741,7 @@
         gameEvEvents.forEach(info => {
           const batterInfo = battingTotals.get(info.batterId);
           evTotals.push({
+            id: info.batterId,
             name: (batterInfo && batterInfo.name) || 'Unknown',
             teamAbbr: (batterInfo && batterInfo.teamAbbr) || '',
             ev: info.ev,
@@ -1720,6 +1753,7 @@
         gameDistEvents.forEach(info => {
           const batterInfo = battingTotals.get(info.batterId);
           distTotals.push({
+            id: info.batterId,
             name: (batterInfo && batterInfo.name) || 'Unknown',
             teamAbbr: (batterInfo && batterInfo.teamAbbr) || '',
             dist: info.dist,
@@ -1733,6 +1767,7 @@
           const existing = pitchSpeedTotals.get(personId);
           if (!existing || info.speed > existing.speed) {
             pitchSpeedTotals.set(personId, {
+              id: personId,
               name: (pitcherInfo && pitcherInfo.name) || (existing && existing.name) || 'Unknown',
               teamAbbr: (pitcherInfo && pitcherInfo.teamAbbr) || (existing && existing.teamAbbr) || '',
               speed: info.speed,
@@ -1777,7 +1812,7 @@
     const rows = entries.map((e, i) => {
       const isDup = nameCounts.get(e.name) > 1;
       const teamCls = isDup ? 'lb-team lb-team-dup' : 'lb-team';
-      return `<div class="lb-row"><span class="lb-rank">${i + 1}.</span><span class="lb-name" title="${e.name} — ${e.teamAbbr}">${e.name}<span class="${teamCls}">${e.teamAbbr}</span></span><span class="lb-value">${fmt(e[key])}</span></div>`;
+      return `<div class="lb-row"><span class="lb-rank">${i + 1}.</span><span class="lb-name" title="${e.name} — ${e.teamAbbr}">${savantPlayerLink(e.id, e.name)}<span class="${teamCls}">${e.teamAbbr}</span></span><span class="lb-value">${fmt(e[key])}</span></div>`;
     }).join('');
     return `<div class="lb-card"><h4>${title}</h4><div class="lb-rows-scroll">${rows}</div></div>`;
   }
@@ -3152,7 +3187,7 @@
       const dueUpBadge = isAtBat ? ' <span class="at-bat-badge">AT BAT</span>' : (isOnDeck ? ' <span class="on-deck-badge">ON DECK</span>' : (isInHole ? ' <span class="in-hole-badge">IN HOLE</span>' : ''));
       const rowCls = (isAtBat || isOnDeck || isInHole) ? ' class="due-up-row"' : '';
       return `<tr${rowCls}>
-        <td>${r.batter.name}${pos}${dueUpBadge}</td>
+        <td>${savantPlayerLink(r.batter.id, r.batter.name)}${pos}${dueUpBadge}</td>
         <td>${num(s.atBats)}</td><td>${num(s.hits)}</td><td>${num(s.doubles)}</td><td>${num(s.triples)}</td><td>${num(s.homeRuns)}</td><td>${num(s.rbi)}</td><td>${num(s.baseOnBalls)}</td><td>${num(s.strikeOuts)}</td>
         <td>${s.avg || '-'}</td><td>${s.ops || '-'}</td><td>${wrc}</td><td>${war}</td><td>${sb}</td><td>${sprintStr}</td><td>${vsPitchCell}</td>
       </tr>`;
@@ -3799,7 +3834,7 @@
         const vsPitchAvgs = awayPitchAvgMaps.map(m => (m.has(b.id) ? m.get(b.id) : null));
         return { batter: b, stat, seasonStat, sprint: sprintMap.get(b.id) || null, vsPitchAvgs, batAdv: wrcMap.get(b.id) || null };
       }));
-      sections.push(buildMatchupTable(`${game.teams.home.team.name} batters vs. ${awayPitcher.fullName} (P)`, rows, awayTopPitches));
+      sections.push(buildMatchupTable(`${game.teams.home.team.name} batters vs. ${savantPlayerLink(awayPitcher.id, awayPitcher.fullName)} (P)`, rows, awayTopPitches));
     }
     if (homePitcher) {
       const homeTopPitches = await getTopPitchTypes(homePitcher.id, season, 3);
@@ -3812,7 +3847,7 @@
         const vsPitchAvgs = homePitchAvgMaps.map(m => (m.has(b.id) ? m.get(b.id) : null));
         return { batter: b, stat, seasonStat, sprint: sprintMap.get(b.id) || null, vsPitchAvgs, batAdv: wrcMap.get(b.id) || null };
       }));
-      sections.push(buildMatchupTable(`${game.teams.away.team.name} batters vs. ${homePitcher.fullName} (P)`, rows, homeTopPitches));
+      sections.push(buildMatchupTable(`${game.teams.away.team.name} batters vs. ${savantPlayerLink(homePitcher.id, homePitcher.fullName)} (P)`, rows, homeTopPitches));
     }
 
     const note = `<div class="spray-note">Career batter-vs-pitcher totals. *SB is each batter's ${season} season total (MLB's batter-vs-pitcher split doesn't track stolen bases specifically). Sprint speed and percentile via Baseball Savant Statcast (percentile computed among all ${season} qualifiers). wRC+ (100 = league average) and WAR via FanGraphs. "AVG vs Top Pitches" is each batter's ${season} season batting average against the pitcher's 3 most-used pitch types league-wide (Baseball Savant), not specific to facing this pitcher.${usingPostedLineups ? ' Using today\'s confirmed starting lineups.' : ' Lineups aren\'t posted yet — showing each team\'s active-roster hitters instead.'}</div>`;
@@ -3886,7 +3921,7 @@
           ? '<span class="bullpen-tag bullpen-tag-used">Pitched tonight</span>'
           : '<span class="bullpen-tag">Bullpen</span>';
         return `<details class="bullpen-pitcher">
-          <summary>${pitcher.name} ${tag} <span style="color:var(--text-dim)">${totalAB} career AB vs this lineup</span></summary>
+          <summary>${savantPlayerLink(pitcher.id, pitcher.name, { stopPropagation: true })} ${tag} <span style="color:var(--text-dim)">${totalAB} career AB vs this lineup</span></summary>
           ${buildSortableMatchupBlock(rows, [], dueUpIds)}
         </details>`;
       }));
@@ -4268,7 +4303,7 @@
       const cells = pctlKeys.map(k => `<td${pctlCellStyle(r[k])}>${r[k] != null ? r[k] : '-'}</td>`).join('');
       return `<tr>
         <td>${i + 1}</td>
-        <td class="prospect-name">${r.name}${r.pos !== '-' ? ` <span style="color:var(--text-dim)">${r.pos}</span>` : ''}</td>
+        <td class="prospect-name">${savantPlayerLink(r.id, r.name)}${r.pos !== '-' ? ` <span style="color:var(--text-dim)">${r.pos}</span>` : ''}</td>
         <td>${logo}${r.team}</td>
         ${cells}
       </tr>`;
@@ -4444,7 +4479,7 @@
       const cells = pctlKeys.map(k => `<td${pctlCellStyle(r[k])}>${r[k] != null ? r[k] : '-'}</td>`).join('');
       return `<tr>
         <td>${i + 1}</td>
-        <td class="prospect-name">${r.name}</td>
+        <td class="prospect-name">${savantPlayerLink(r.id, r.name)}</td>
         <td>${logo}${r.team}</td>
         ${cells}
       </tr>`;
@@ -4594,7 +4629,7 @@
     }).join('');
     const sorted = sortBatterLbRows(rows);
     const body = sorted.map(r => `<tr>
-      <td>${r.name}</td>
+      <td>${savantPlayerLink(r.id, r.name)}</td>
       <td>${r.team}</td>
       <td>${r.pa}</td>
       <td>${r.hr}</td>
@@ -4762,7 +4797,7 @@
         : '';
       return `<tr>
         <td>${r.rank}</td>
-        <td class="prospect-name" title="${escapeAttr(r.report)}">${r.name}</td>
+        <td class="prospect-name" title="${escapeAttr(r.report)}">${savantPlayerLink(r.id, r.name)}</td>
         <td>${logo}${r.team}</td>
         <td>${r.position}</td>
         <td>${r.fv != null ? r.fv : '-'}</td>
@@ -4991,7 +5026,7 @@
       const eraDiff = fmtEraSigned(r.eraDiff);
       return `<tr>
         <td>${i + 1}</td>
-        <td class="prospect-name">${r.name}</td>
+        <td class="prospect-name">${savantPlayerLink(r.id, r.name)}</td>
         <td>${logo}${r.team}</td>
         <td>${r.pa != null ? r.pa : '-'}</td>
         <td>${r.bip != null ? r.bip : '-'}</td>
@@ -5161,7 +5196,7 @@
       const wobaDiff = fmtAvgSigned(r.wobaDiff);
       return `<tr>
         <td>${i + 1}</td>
-        <td class="prospect-name">${r.name}</td>
+        <td class="prospect-name">${savantPlayerLink(r.id, r.name)}</td>
         <td>${logo}${r.team}</td>
         <td>${r.pa != null ? r.pa : '-'}</td>
         <td>${r.bip != null ? r.bip : '-'}</td>
