@@ -2026,7 +2026,8 @@
   }
 
   function playerDisplayName(p) {
-    return p.person && p.person.fullName ? p.person.fullName : 'Unknown';
+    if (!p.person || !p.person.fullName) return 'Unknown';
+    return savantPlayerLink(p.person.id, p.person.fullName);
   }
 
   function buildBattingTable(players) {
@@ -2534,8 +2535,8 @@
     const count = (typeof ls.balls === 'number' && typeof ls.strikes === 'number') ? `${ls.balls}-${ls.strikes}` : null;
     const outs = typeof ls.outs === 'number' ? `${ls.outs} out${ls.outs === 1 ? '' : 's'}` : null;
     const countLine = [count, outs].filter(Boolean).join(', ');
-    const onDeck = offense.onDeck ? offense.onDeck.fullName : null;
-    const inHole = offense.inHole ? offense.inHole.fullName : null;
+    const onDeck = offense.onDeck ? savantPlayerLink(offense.onDeck.id, offense.onDeck.fullName) : null;
+    const inHole = offense.inHole ? savantPlayerLink(offense.inHole.id, offense.inHole.fullName) : null;
 
     const runners = [
       { base: '1B', player: offense.first },
@@ -2543,14 +2544,14 @@
       { base: '3B', player: offense.third }
     ].filter(r => r.player);
     const runnersLine = runners.length
-      ? runners.map(r => `${r.base}: ${r.player.fullName}`).join(' · ')
+      ? runners.map(r => `${r.base}: ${savantPlayerLink(r.player.id, r.player.fullName)}`).join(' · ')
       : 'Bases empty';
 
     return `<div class="boxscore-team">
       <h3>At the Plate</h3>
       <div class="at-bat-wrap">
         <div class="at-bat-banner">
-          <div class="at-bat-row"><span class="at-bat-badge">AT BAT</span> ${teamAbbr ? `<span style="color:var(--text-dim)">${teamAbbr}</span> ` : ''}${offense.batter.fullName}${countLine ? ` <span style="color:var(--text-dim)">(${countLine})</span>` : ''}</div>
+          <div class="at-bat-row"><span class="at-bat-badge">AT BAT</span> ${teamAbbr ? `<span style="color:var(--text-dim)">${teamAbbr}</span> ` : ''}${savantPlayerLink(offense.batter.id, offense.batter.fullName)}${countLine ? ` <span style="color:var(--text-dim)">(${countLine})</span>` : ''}</div>
           ${onDeck ? `<div class="at-bat-row"><span class="on-deck-badge">ON DECK</span> ${onDeck}</div>` : ''}
           ${inHole ? `<div class="at-bat-row"><span class="in-hole-badge">IN HOLE</span> ${inHole}</div>` : ''}
         </div>
@@ -3307,8 +3308,9 @@
   }
 
   function formatPitcherLine(pitcher, stat, war) {
+    const nameLink = savantPlayerLink(pitcher.id, pitcher.fullName);
     if (!stat) {
-      return `<div class="lb-row"><span class="lb-name">${pitcher.fullName}</span><span class="lb-value" style="color:var(--text-dim)">no data</span></div>`;
+      return `<div class="lb-row"><span class="lb-name">${nameLink}</span><span class="lb-value" style="color:var(--text-dim)">no data</span></div>`;
     }
     const w = num(stat.wins), l = num(stat.losses);
     const era = stat.era || '-';
@@ -3317,7 +3319,7 @@
     const ip = stat.inningsPitched || '-';
     const k = num(stat.strikeOuts), bb = num(stat.baseOnBalls), hr = num(stat.homeRuns);
     const warStr = typeof war === 'number' ? ` · ${war.toFixed(1)} WAR` : '';
-    return `<div class="lb-row"><span class="lb-name">${pitcher.fullName}</span><span class="lb-value">${w}-${l} · ${era} ERA · ${fipStr} FIP*${warStr}</span></div>
+    return `<div class="lb-row"><span class="lb-name">${nameLink}</span><span class="lb-value">${w}-${l} · ${era} ERA · ${fipStr} FIP*${warStr}</span></div>
       <div class="lb-row"><span class="lb-name" style="color:var(--text-dim)">IP / K / BB / HR</span><span class="lb-value">${ip} IP · ${k} K · ${bb} BB · ${hr} HR</span></div>`;
   }
 
@@ -3731,9 +3733,9 @@
       rows.push(formatPitchMixLine(awayArsenal, awayStuff));
       rows.push(formatRunGameLine('Steals allowed (P)', awayPStat));
       rows.push(awayCatcher
-        ? formatRunGameLine(`Steals allowed (C – ${awayCatcher.name})`, awayCStat)
+        ? formatRunGameLine(`Steals allowed (C – ${savantPlayerLink(awayCatcher.id, awayCatcher.name)})`, awayCStat)
         : `<div class="lb-row"><span class="lb-name">C not confirmed</span><span class="lb-value" style="color:var(--text-dim)">-</span></div>`);
-      if (awayCatcher) rows.push(formatPopTimeLine(awayCatcher.name, awayPop));
+      if (awayCatcher) rows.push(formatPopTimeLine(savantPlayerLink(awayCatcher.id, awayCatcher.name), awayPop));
     }
     if (homePitcher) {
       rows.push(`<div class="stat-label">${game.teams.home.team.name}</div>`);
@@ -3741,9 +3743,9 @@
       rows.push(formatPitchMixLine(homeArsenal, homeStuff));
       rows.push(formatRunGameLine('Steals allowed (P)', homePStat));
       rows.push(homeCatcher
-        ? formatRunGameLine(`Steals allowed (C – ${homeCatcher.name})`, homeCStat)
+        ? formatRunGameLine(`Steals allowed (C – ${savantPlayerLink(homeCatcher.id, homeCatcher.name)})`, homeCStat)
         : `<div class="lb-row"><span class="lb-name">C not confirmed</span><span class="lb-value" style="color:var(--text-dim)">-</span></div>`);
-      if (homeCatcher) rows.push(formatPopTimeLine(homeCatcher.name, homePop));
+      if (homeCatcher) rows.push(formatPopTimeLine(savantPlayerLink(homeCatcher.id, homeCatcher.name), homePop));
     }
 
     return `<div class="boxscore-team">
@@ -3765,7 +3767,7 @@
     const buildList = (teamName, players) => {
       const items = players.map((p, i) => {
         const pos = p.primaryPosition ? p.primaryPosition.abbreviation : '';
-        return `<tr><td class="lineup-spot">${i + 1}</td><td>${p.fullName}</td><td class="lineup-pos">${pos}</td></tr>`;
+        return `<tr><td class="lineup-spot">${i + 1}</td><td>${savantPlayerLink(p.id, p.fullName)}</td><td class="lineup-pos">${pos}</td></tr>`;
       }).join('');
       return `<div class="boxscore-team">
         <h3>${teamName}</h3>
