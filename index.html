@@ -163,46 +163,6 @@
     color: var(--text-dim);
     margin-top: 8px;
   }
-  .exp-standings-wrap {
-    max-width: 1100px;
-    margin: 0 auto;
-  }
-  .exp-standings-table-wrap {
-    overflow-x: auto;
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 16px;
-  }
-  table.exp-standings-table {
-    border-collapse: collapse;
-    font-size: 12px;
-    width: 100%;
-  }
-  table.exp-standings-table th, table.exp-standings-table td {
-    padding: 5px 8px;
-    text-align: center;
-    white-space: nowrap;
-  }
-  table.exp-standings-table td:first-child, table.exp-standings-table th:first-child {
-    text-align: left;
-    min-width: 160px;
-  }
-  table.exp-standings-table img { width: 16px; height: 16px; object-fit: contain; vertical-align: middle; margin-right: 5px; }
-  table.exp-standings-table th.sortable-col {
-    cursor: pointer;
-    color: var(--text-dim);
-    font-weight: 600;
-    border-bottom: 1px solid var(--card-border);
-    font-size: 11px;
-    text-transform: uppercase;
-    user-select: none;
-  }
-  table.exp-standings-table th.sortable-col:hover { color: var(--text); }
-  table.exp-standings-table th.sortable-col.active-sort { color: var(--live); }
-  table.exp-standings-table td.plus-pos { color: var(--live); }
-  table.exp-standings-table td.plus-neg { color: var(--accent); }
   .batter-lb-wrap {
     max-width: 1100px;
     margin: 0 auto;
@@ -963,7 +923,6 @@
   <button class="tab-btn" id="standingsTabBtn">Standings</button>
   <button class="tab-btn" id="pctlTabBtn">Batter Percentile Rankings</button>
   <button class="tab-btn" id="pitcherPctlTabBtn">Pitcher Percentile Rankings</button>
-  <button class="tab-btn" id="expStandingsTabBtn">Expected Standings</button>
   <button class="tab-btn" id="batterLbTabBtn">Batter Leaderboard</button>
   <button class="tab-btn" id="prospectsTabBtn">Top 100 Prospects</button>
   <button class="tab-btn" id="pitchExpStatsTabBtn">Pitching Expected Statistics</button>
@@ -997,12 +956,6 @@
 <div id="pitcherPctlView" class="hidden">
   <div class="prospects-wrap">
     <div id="pitcherPctlContent"><div class="spinner">Loading pitcher percentile rankings…</div></div>
-  </div>
-</div>
-
-<div id="expStandingsView" class="hidden">
-  <div class="exp-standings-wrap">
-    <div id="expStandingsContent"><div class="spinner">Loading expected standings…</div></div>
   </div>
 </div>
 
@@ -1081,9 +1034,6 @@
   const pitcherPctlTabBtn = document.getElementById('pitcherPctlTabBtn');
   const pitcherPctlView = document.getElementById('pitcherPctlView');
   const pitcherPctlContent = document.getElementById('pitcherPctlContent');
-  const expStandingsTabBtn = document.getElementById('expStandingsTabBtn');
-  const expStandingsView = document.getElementById('expStandingsView');
-  const expStandingsContent = document.getElementById('expStandingsContent');
   const batterLbTabBtn = document.getElementById('batterLbTabBtn');
   const batterLbView = document.getElementById('batterLbView');
   const batterLbContent = document.getElementById('batterLbContent');
@@ -4548,141 +4498,6 @@
     }
   }
 
-  // ---------- Expected Standings (basewinner.com) ----------
-  // This page's data isn't inlined into the
-  // HTML — the Vue app fetches it from its own standings.json endpoint
-  // (visible as a distinct network request when the page loads). That
-  // endpoint doesn't send CORS headers either, so it's routed through the
-  // same r.jina.ai reader proxy; jina wraps the raw JSON in a short
-  // "Markdown Content:" preamble but leaves the JSON itself byte-for-byte
-  // intact, so it's extracted with a simple indexOf('[')/lastIndexOf(']')
-  // slice and parsed directly — no HTML/table scraping needed here.
-  const EXP_STANDINGS_COLUMNS = [
-    { key: 'name', label: 'Team' },
-    { key: 'g', label: 'G' },
-    { key: 'w', label: 'W' },
-    { key: 'l', label: 'L' },
-    { key: 'winPct', label: 'Win %' },
-    { key: 'wrcPlus', label: 'wRC+' },
-    { key: 'xfipMinus', label: 'xFIP-' },
-    { key: 'drs', label: 'DRS' },
-    { key: 'xWins', label: 'xWins' },
-    { key: 'xLosses', label: 'xLosses' },
-    { key: 'impWinPct', label: 'Imp Win %' },
-    { key: 'winsBehindX', label: 'xWins ±' }
-  ];
-  let expStandingsSort = { col: 'winPct', dir: 'desc' }; // matches the source site's default order
-
-  function fmtPlus(v, decimals) {
-    if (typeof v !== 'number' || isNaN(v)) return '-';
-    const s = v.toFixed(decimals);
-    return v > 0 ? '+' + s : s;
-  }
-
-  function parseExpectedStandings(json) {
-    return json.map(t => ({
-      team: t['Team'],
-      name: t['Name'],
-      league: t['League'],
-      division: t['Division'],
-      g: t['G'],
-      w: t['W'],
-      l: t['L'],
-      winPct: t['W%'],
-      wrcPlus: t['wRC+'],
-      xfipMinus: t['xFIP-'],
-      drs: t['DRS'],
-      xWins: t['Expected Wins'],
-      xLosses: t['Expected Losses'],
-      impWinPct: t['Implied Win Pct'],
-      winsBehindX: t['Wins Behind X']
-    }));
-  }
-
-  async function fetchExpectedStandings() {
-    const target = 'https://basewinner.com/data/expected-standings/standings.json';
-    const res = await fetch('https://r.jina.ai/' + target);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    const start = text.indexOf('[');
-    const end = text.lastIndexOf(']');
-    if (start === -1 || end === -1) throw new Error('Unexpected response format');
-    const json = JSON.parse(text.slice(start, end + 1));
-    return parseExpectedStandings(json);
-  }
-
-  function sortExpStandingsRows(rows) {
-    const dir = expStandingsSort.dir === 'asc' ? 1 : -1;
-    const key = expStandingsSort.col;
-    return rows.slice().sort((a, b) => {
-      const av = a[key], bv = b[key];
-      const aMissing = av == null || (typeof av === 'number' && isNaN(av));
-      const bMissing = bv == null || (typeof bv === 'number' && isNaN(bv));
-      if (aMissing && bMissing) return 0;
-      if (aMissing) return 1;
-      if (bMissing) return -1;
-      if (typeof av === 'string') return av.localeCompare(bv) * dir;
-      return (av - bv) * dir;
-    });
-  }
-
-  function buildExpStandingsTable(rows) {
-    const headerCells = EXP_STANDINGS_COLUMNS.map(c => {
-      const active = expStandingsSort.col === c.key;
-      const arrow = active ? (expStandingsSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
-      return `<th data-sort-key="${c.key}" class="sortable-col${active ? ' active-sort' : ''}">${c.label}${arrow}</th>`;
-    }).join('');
-    const sorted = sortExpStandingsRows(rows);
-    const body = sorted.map(r => {
-      const drsClass = r.drs > 0 ? 'plus-pos' : (r.drs < 0 ? 'plus-neg' : '');
-      const behindClass = r.winsBehindX > 0 ? 'plus-pos' : (r.winsBehindX < 0 ? 'plus-neg' : '');
-      return `<tr>
-        <td><img src="https://basewinner.com/data/expected-standings/images/${r.team}.png" onerror="this.style.display='none'">${r.name}</td>
-        <td>${r.g}</td>
-        <td>${r.w}</td>
-        <td>${r.l}</td>
-        <td>${typeof r.winPct === 'number' ? r.winPct.toFixed(3) : '-'}</td>
-        <td>${Math.round(r.wrcPlus)}</td>
-        <td>${Math.round(r.xfipMinus)}</td>
-        <td class="${drsClass}">${fmtPlus(r.drs, 0)}</td>
-        <td>${typeof r.xWins === 'number' ? r.xWins.toFixed(1) : '-'}</td>
-        <td>${typeof r.xLosses === 'number' ? r.xLosses.toFixed(1) : '-'}</td>
-        <td>${typeof r.impWinPct === 'number' ? r.impWinPct.toFixed(3) : '-'}</td>
-        <td class="${behindClass}">${fmtPlus(r.winsBehindX, 1)}</td>
-      </tr>`;
-    }).join('');
-    return `<table class="exp-standings-table">
-      <thead><tr>${headerCells}</tr></thead>
-      <tbody>${body || '<tr><td colspan="12" class="lb-empty">No data</td></tr>'}</tbody>
-    </table>
-    <div class="standings-note">Source: basewinner.com expected standings. xWins/xLosses (expected record) blend wRC+, xFIP-, and DRS to estimate a team's "true talent" record independent of W-L luck; xWins ± shows wins above/below that expectation. Click a column header to sort. Refreshes automatically while this tab is open.</div>`;
-  }
-
-  function renderExpStandingsTableInto(rows) {
-    expStandingsContent.innerHTML = `<div class="exp-standings-table-wrap">${buildExpStandingsTable(rows)}</div>`;
-    expStandingsContent.querySelectorAll('th.sortable-col').forEach(th => {
-      th.addEventListener('click', () => {
-        const key = th.getAttribute('data-sort-key');
-        if (expStandingsSort.col === key) {
-          expStandingsSort.dir = expStandingsSort.dir === 'asc' ? 'desc' : 'asc';
-        } else {
-          expStandingsSort = { col: key, dir: 'desc' };
-        }
-        renderExpStandingsTableInto(rows);
-      });
-    });
-  }
-
-  async function renderExpStandingsView() {
-    expStandingsContent.innerHTML = '<div class="spinner">Loading expected standings…</div>';
-    try {
-      const rows = await fetchExpectedStandings();
-      renderExpStandingsTableInto(rows);
-    } catch (err) {
-      expStandingsContent.innerHTML = `<div class="empty">Couldn't load expected standings: ${err.message}</div>`;
-    }
-  }
-
   // ---------- Batter Leaderboard (tjstats.ca) ----------
   // tjstats.ca's leaderboard page (like its pitcher-side tjStuff+ data used
   // above) is powered by an internal JSON action endpoint at its root path
@@ -5415,7 +5230,6 @@
     standingsView.classList.toggle('hidden', tab !== 'standings');
     pctlView.classList.toggle('hidden', tab !== 'pctl');
     pitcherPctlView.classList.toggle('hidden', tab !== 'pitcherpctl');
-    expStandingsView.classList.toggle('hidden', tab !== 'expstandings');
     batterLbView.classList.toggle('hidden', tab !== 'batterlb');
     prospectsView.classList.toggle('hidden', tab !== 'prospects');
     pitchExpStatsView.classList.toggle('hidden', tab !== 'pitchexpstats');
@@ -5424,7 +5238,6 @@
     standingsTabBtn.classList.toggle('active', tab === 'standings');
     pctlTabBtn.classList.toggle('active', tab === 'pctl');
     pitcherPctlTabBtn.classList.toggle('active', tab === 'pitcherpctl');
-    expStandingsTabBtn.classList.toggle('active', tab === 'expstandings');
     batterLbTabBtn.classList.toggle('active', tab === 'batterlb');
     prospectsTabBtn.classList.toggle('active', tab === 'prospects');
     pitchExpStatsTabBtn.classList.toggle('active', tab === 'pitchexpstats');
@@ -5432,7 +5245,6 @@
     if (tab === 'standings') loadStandings();
     if (tab === 'pctl') renderPctlView();
     if (tab === 'pitcherpctl') renderPitcherPctlView();
-    if (tab === 'expstandings') renderExpStandingsView();
     if (tab === 'batterlb') renderBatterLbView();
     if (tab === 'prospects') renderProspectsView();
     if (tab === 'pitchexpstats') renderPitchExpStatsView();
@@ -5521,7 +5333,6 @@
   pitcherPctlTabBtn.addEventListener('click', () => showTab('pitcherpctl'));
   alToggleBtn.addEventListener('click', () => setStandingsLeague('AL'));
   nlToggleBtn.addEventListener('click', () => setStandingsLeague('NL'));
-  expStandingsTabBtn.addEventListener('click', () => showTab('expstandings'));
   batterLbTabBtn.addEventListener('click', () => showTab('batterlb'));
   prospectsTabBtn.addEventListener('click', () => showTab('prospects'));
   pitchExpStatsTabBtn.addEventListener('click', () => showTab('pitchexpstats'));
@@ -5541,20 +5352,16 @@
     }
   }, 15000);
 
-  // The Pitcher Ratings / Expected Standings / Top 100 Prospects / Pitching
-  // & Batting Expected Stats tabs pull from third-party sites (FanGraphs,
-  // basewinner.com, tjstats.ca, Baseball Savant) that publish daily/season
-  // leaderboards, not live in-game data — refreshing those every 15s would
-  // be pointless and needlessly hard on those sites, so they stay on their
-  // own slower 60s cadence, decoupled from the live scoreboard above. The
-  // Batter Leaderboard tab is checked too, but fetchBatterLeaderboard()
-  // internally no-ops unless the calendar date has rolled over since its
-  // last successful fetch, per the once-a-day cadence the user asked for
-  // there.
+  // The Top 100 Prospects / Pitching & Batting Expected Stats / Percentile
+  // Rankings tabs pull from third-party sites (tjstats.ca, Baseball Savant)
+  // that publish daily/season leaderboards, not live in-game data —
+  // refreshing those every 15s would be pointless and needlessly hard on
+  // those sites, so they stay on their own slower 60s cadence, decoupled
+  // from the live scoreboard above. The Batter Leaderboard tab is checked
+  // too, but fetchBatterLeaderboard() internally no-ops unless the calendar
+  // date has rolled over since its last successful fetch, per the
+  // once-a-day cadence the user asked for there.
   setInterval(() => {
-    if (!expStandingsView.classList.contains('hidden')) {
-      renderExpStandingsView();
-    }
     if (!batterLbView.classList.contains('hidden')) {
       renderBatterLbView();
     }
