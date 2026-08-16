@@ -749,6 +749,11 @@
     font-size: 12px;
     margin-bottom: 12px;
     display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .bullpen-availability > div {
+    display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
@@ -758,10 +763,14 @@
     font-weight: 700;
     padding: 2px 8px;
     border-radius: 10px;
+    flex-shrink: 0;
   }
   .avail-unavailable { background: rgba(210,45,45,0.2); color: #ff7a6e; }
   .avail-limited { background: rgba(245,185,66,0.18); color: var(--sched); }
   .avail-fresh { background: rgba(46,204,113,0.15); color: var(--live); }
+  .avail-names {
+    color: var(--text-dim);
+  }
   .sub-indent::before {
     content: "↳";
     position: absolute;
@@ -4198,18 +4207,35 @@
       if (!bullpen.length) return '';
 
       const usage = await getTeamPriorPitcherUsage(side.teamId, officialDate);
-      const availCounts = { unavailable: 0, limited: 0, fresh: 0 };
+      const unavailableNames = [];
+      const limitedNames = [];
+      let freshCount = 0;
       bullpen.forEach(p => {
         const streak = pitcherStreak(p.id, usage);
-        if (streak === 3) availCounts.unavailable++;
-        else if (streak === 2) availCounts.limited++;
-        else availCounts.fresh++;
+        if (streak === 3) unavailableNames.push(p);
+        else if (streak === 2) limitedNames.push(p);
+        else freshCount++;
       });
+      // Names, not just counts — each linked to Baseball Savant like every
+      // other player mention in this file. The "unavailable"/"limited"
+      // arms are the ones worth naming (that's the actionable info before
+      // first pitch); "fresh" is left as a plain count since normally most
+      // of the bullpen qualifies and listing all of them would just be
+      // noise.
+      const namesList = names => names.map(p => savantPlayerLink(p.id, p.name)).join(', ');
       const availabilitySummary = `<div class="bullpen-availability">
-        <span class="avail-tag avail-unavailable">🔥 ${availCounts.unavailable} unavailable</span>
-        <span class="avail-tag avail-limited">⚠ ${availCounts.limited} limited</span>
-        <span class="avail-tag avail-fresh">✅ ${availCounts.fresh} fresh</span>
-        <span style="color:var(--text-dim)"> of ${bullpen.length} bullpen arms (based on the last 2 days' usage)</span>
+        <div>
+          <span class="avail-tag avail-unavailable">🔥 ${unavailableNames.length} unavailable</span>
+          ${unavailableNames.length ? `<span class="avail-names">${namesList(unavailableNames)}</span>` : ''}
+        </div>
+        <div>
+          <span class="avail-tag avail-limited">⚠ ${limitedNames.length} limited</span>
+          ${limitedNames.length ? `<span class="avail-names">${namesList(limitedNames)}</span>` : ''}
+        </div>
+        <div>
+          <span class="avail-tag avail-fresh">✅ ${freshCount} fresh</span>
+          <span style="color:var(--text-dim)"> of ${bullpen.length} bullpen arms (based on the last 2 days' usage)</span>
+        </div>
       </div>`;
 
       // boxscore is null pre-game (buildMatchupHistorySection calls this
