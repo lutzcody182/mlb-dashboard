@@ -875,6 +875,36 @@
     border-radius: 50%;
     display: inline-block;
   }
+  .pitch-mix-wrap {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 6px 0 10px;
+  }
+  .pitch-mix-donut {
+    width: 64px;
+    height: 64px;
+    flex-shrink: 0;
+  }
+  .pitch-mix-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .pitch-mix-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .pitch-mix-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
   .spray-venue {
     font-size: 12px;
     color: var(--text-dim);
@@ -2250,6 +2280,21 @@
   const HIT_COLORS = { single: '#4da3ff', double: '#f5c542', triple: '#a855f7', home_run: '#ff4d4d' };
   const HIT_LABELS = { single: 'Single', double: 'Double', triple: 'Triple', home_run: 'Home Run' };
 
+  // Fixed color per Statcast pitch-type code, used by the pitch-mix donut
+  // below — kept stable/distinct across fastball, breaking, and offspeed
+  // families so the same pitch always reads as the same color everywhere
+  // it's shown. Anything not in this list (rare pitch types) falls back to
+  // a neutral gray rather than crashing or repeating an existing color.
+  const PITCH_TYPE_COLORS = {
+    FF: '#ff4d4d', SI: '#f5824a', FA: '#ff8c69', FC: '#f5c542',
+    SL: '#2a9d8f', ST: '#0f766e', CU: '#4da3ff', KC: '#3a6ea5',
+    CH: '#a855f7', FS: '#c084fc', SV: '#8b5cf6',
+    KN: '#9aa0ab', EP: '#9aa0ab', FO: '#9aa0ab', SC: '#9aa0ab'
+  };
+  function pitchTypeColor(code) {
+    return PITCH_TYPE_COLORS[code] || '#9aa0ab';
+  }
+
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
   // The public MLB Stats API does not expose Statcast's official expected
@@ -3323,19 +3368,51 @@
       <div class="lb-row"><span class="lb-name" style="color:var(--text-dim)">IP / K / BB / HR</span><span class="lb-value">${ip} IP · ${k} K · ${bb} BB · ${hr} HR</span></div>`;
   }
 
+  // Donut chart of a pitcher's pitch-type usage, drawn as a ring of SVG
+  // <circle> strokes (the standard dasharray/dashoffset trick — each
+  // segment's dash length is its share of the circle's circumference, and
+  // dashoffset shifts it to start right after the previous segment ends)
+  // rather than a proper arc-path, since every segment is a plain circular
+  // stroke and this needs no external charting library, matching the spray
+  // chart / win probability chart already in this file. The center label
+  // reuses tjStuff+ overall (previously a separate text row above this)
+  // so it isn't shown twice.
+  function buildPitchMixDonut(arsenal, stuffData) {
+    const size = 84, r = 32, stroke = 13, cx = size / 2, cy = size / 2;
+    const circumference = 2 * Math.PI * r;
+    const top6 = arsenal.slice(0, 6);
+    let offset = 0;
+    const segments = top6.map(a => {
+      const dash = Math.max(0, a.percentage) * circumference;
+      const seg = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${pitchTypeColor(a.type.code)}" stroke-width="${stroke}" stroke-dasharray="${dash.toFixed(2)} ${Math.max(0, circumference - dash).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" transform="rotate(-90 ${cx} ${cy})"><title>${a.type.code} ${Math.round(a.percentage * 100)}%</title></circle>`;
+      offset += dash;
+      return seg;
+    }).join('');
+    const overall = stuffData && typeof stuffData.overall === 'number' ? Math.round(stuffData.overall) : null;
+    const centerLabel = overall != null
+      ? `<text x="${cx}" y="${cy - 3}" text-anchor="middle" font-size="16" font-weight="700" fill="var(--text)">${overall}</text>
+         <text x="${cx}" y="${cy + 11}" text-anchor="middle" font-size="8" fill="var(--text-dim)">Stuff+</text>`
+      : '';
+    const legend = top6.map(a => {
+      const stuff = stuffData && stuffData.byPitch ? stuffData.byPitch[a.type.code] : null;
+      const stuffStr = typeof stuff === 'number' ? ` <span style="color:var(--text-dim)">(${Math.round(stuff)})</span>` : '';
+      return `<div class="pitch-mix-legend-item"><span class="pitch-mix-dot" style="background:${pitchTypeColor(a.type.code)}"></span>${a.type.code} ${Math.round(a.percentage * 100)}%${stuffStr}</div>`;
+    }).join('');
+    return `<div class="pitch-mix-wrap">
+      <svg viewBox="0 0 ${size} ${size}" class="pitch-mix-donut">
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="rgba(154,160,171,0.15)" stroke-width="${stroke}"></circle>
+        ${segments}
+        ${centerLabel}
+      </svg>
+      <div class="pitch-mix-legend">${legend}</div>
+    </div>`;
+  }
+
   function formatPitchMixLine(arsenal, stuffData) {
     if (!arsenal || arsenal.length === 0) {
       return `<div class="lb-row"><span class="lb-name" style="color:var(--text-dim)">Pitch mix</span><span class="lb-value" style="color:var(--text-dim)">no data</span></div>`;
     }
-    const parts = arsenal.slice(0, 6).map(a => {
-      const stuff = stuffData && stuffData.byPitch ? stuffData.byPitch[a.type.code] : null;
-      const stuffStr = typeof stuff === 'number' ? ` (${Math.round(stuff)} Stuff+)` : '';
-      return `${a.type.code} ${Math.round(a.percentage * 100)}%${stuffStr}`;
-    }).join(' · ');
-    const overallRow = (stuffData && typeof stuffData.overall === 'number')
-      ? `<div class="lb-row"><span class="lb-name" style="color:var(--text-dim)">tjStuff+ (overall)</span><span class="lb-value">${Math.round(stuffData.overall)}</span></div>`
-      : '';
-    return overallRow + `<div class="lb-row"><span class="lb-name" style="color:var(--text-dim)">Pitch mix</span><span class="lb-value" style="font-size:12px;">${parts}</span></div>`;
+    return buildPitchMixDonut(arsenal, stuffData);
   }
 
   // tjStuff+ pitch-quality grades (100 = league average) sourced from tjstats.ca's
