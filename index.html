@@ -482,6 +482,46 @@
     0%, 100% { box-shadow: 0 0 4px 0 rgba(168,85,247,0.25); }
     50% { box-shadow: 0 0 16px 3px rgba(168,85,247,0.65); }
   }
+  /* No-hitter / perfect-game bid — unlike .pitching-change and
+     .lineup-confirmed, this is NOT sticky-until-opened: it's recomputed
+     fresh from the current boxscore every poll (see buildNoHitterInfo), so
+     it naturally disappears the moment a hit is allowed, and stays lit
+     after a completed no-hitter's Final boxscore keeps showing 0 hits. */
+  .card.no-hitter-bid {
+    border-color: #ffd700;
+    animation: noHitterGlow 1.8s ease-in-out infinite;
+  }
+  @keyframes noHitterGlow {
+    0%, 100% { box-shadow: 0 0 4px 0 rgba(255,215,0,0.3); }
+    50% { box-shadow: 0 0 18px 4px rgba(255,215,0,0.75); }
+  }
+  .no-hitter-note {
+    font-size: 11px;
+    font-weight: 700;
+    color: #ffd700;
+    background: rgba(255,215,0,0.12);
+    border-radius: 6px;
+    padding: 4px 8px;
+    margin-bottom: 10px;
+  }
+  .milestone-note {
+    font-size: 11px;
+    font-weight: 700;
+    color: #7dd8ff;
+    background: rgba(93,180,255,0.12);
+    border-radius: 6px;
+    padding: 4px 8px;
+    margin-bottom: 10px;
+  }
+  .milestone-note div + div { margin-top: 2px; }
+  .odds-move {
+    font-size: 10px;
+    font-weight: 700;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+  .odds-move.up { color: #ff7a6e; }
+  .odds-move.down { color: #7dd8a0; }
   .card-top {
     display: flex;
     justify-content: space-between;
@@ -705,6 +745,23 @@
     background: rgba(46,204,113,0.15);
     color: var(--live);
   }
+  .bullpen-availability {
+    font-size: 12px;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .avail-tag {
+    display: inline-block;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+  }
+  .avail-unavailable { background: rgba(210,45,45,0.2); color: #ff7a6e; }
+  .avail-limited { background: rgba(245,185,66,0.18); color: var(--sched); }
+  .avail-fresh { background: rgba(46,204,113,0.15); color: var(--live); }
   .sub-indent::before {
     content: "↳";
     position: absolute;
@@ -971,6 +1028,8 @@
   <button class="tab-btn" id="prospectsTabBtn">Top 100 Prospects</button>
   <button class="tab-btn" id="pitchExpStatsTabBtn">Pitching Expected Statistics</button>
   <button class="tab-btn" id="batExpStatsTabBtn">Batting Expected Statistics</button>
+  <button class="tab-btn" id="oaaTabBtn">Defensive Leaderboard</button>
+  <button class="tab-btn" id="sprintTabBtn">Sprint Speed</button>
 </div>
 
 <div id="scoresView">
@@ -1024,6 +1083,18 @@
 <div id="batExpStatsView" class="hidden">
   <div class="prospects-wrap">
     <div id="batExpStatsContent"><div class="spinner">Loading batting expected statistics…</div></div>
+  </div>
+</div>
+
+<div id="oaaView" class="hidden">
+  <div class="prospects-wrap">
+    <div id="oaaContent"><div class="spinner">Loading defensive leaderboard…</div></div>
+  </div>
+</div>
+
+<div id="sprintView" class="hidden">
+  <div class="prospects-wrap">
+    <div id="sprintContent"><div class="spinner">Loading sprint speed leaderboard…</div></div>
   </div>
 </div>
 
@@ -1090,6 +1161,12 @@
   const batExpStatsTabBtn = document.getElementById('batExpStatsTabBtn');
   const batExpStatsView = document.getElementById('batExpStatsView');
   const batExpStatsContent = document.getElementById('batExpStatsContent');
+  const oaaTabBtn = document.getElementById('oaaTabBtn');
+  const oaaView = document.getElementById('oaaView');
+  const oaaContent = document.getElementById('oaaContent');
+  const sprintTabBtn = document.getElementById('sprintTabBtn');
+  const sprintView = document.getElementById('sprintView');
+  const sprintContent = document.getElementById('sprintContent');
 
   const gamesByPk = new Map();
   const lineupsConfirmedSet = new Set();
@@ -1115,6 +1192,14 @@
   let matchupSortState = [];
   let nextMatchupIndex = 0;
   const boxscoreCache = new Map();
+  // Session-scoped "opening line" for odds-movement tracking (#42): the
+  // FIRST moneyline seen for a gamePk this session, never overwritten.
+  // This is deliberately not a true market-open line (we have no history
+  // before the page was opened) — just this session's first observation,
+  // compared against the latest odds on every render to show a movement
+  // arrow. Cleared implicitly on page reload, which is fine: there's no
+  // persistence requirement here.
+  const openingOddsByGamePk = new Map();
   const teamPriorUsageCache = new Map();
   const playsCache = new Map();
   const gameProbablesCache = new Map(); // gamePk -> { data, confirmed } — only trusted once lineups are confirmed
@@ -1255,6 +1340,30 @@
     return ml < 0 ? (-ml) / (-ml + 100) : 100 / (ml + 100);
   }
 
+  // Odds movement (#42): records the first moneyline seen this session for
+  // each side of each game (openingOddsByGamePk), then on every later call
+  // compares the current line to that opening one and returns a small
+  // arrow tag if it moved. Movement is judged by implied win probability
+  // (impliedProbFromML) rather than raw sign, since e.g. -110 -> -140 and
+  // +120 -> +105 are both "moved toward favorite" even though one stays
+  // negative and the other stays positive. Session-only — see the Map's
+  // comment above for why this isn't a true market-open line.
+  function recordOpeningOdds(gamePk, odds) {
+    if (!odds || openingOddsByGamePk.has(gamePk)) return;
+    openingOddsByGamePk.set(gamePk, { away: odds.away.moneyLine, home: odds.home.moneyLine });
+  }
+
+  function oddsMoveTag(gamePk, currentML, openingML) {
+    if (typeof currentML !== 'number' || typeof openingML !== 'number' || isNaN(currentML) || isNaN(openingML)) return '';
+    const cur = impliedProbFromML(currentML);
+    const open = impliedProbFromML(openingML);
+    const diff = cur - open;
+    if (Math.abs(diff) < 0.005) return ''; // negligible movement, not worth flagging
+    const dir = diff > 0 ? 'up' : 'down';
+    const arrow = diff > 0 ? '▲' : '▼';
+    return `<span class="odds-move ${dir}" title="Opened ${formatML(openingML)}">${arrow}</span>`;
+  }
+
   function formatWind(wind) {
     if (!wind) return '';
     if (wind.indoor) return '<span class="wind-tag">Indoor</span>';
@@ -1362,7 +1471,7 @@
     });
   }
 
-  function buildCard(game, odds, wind, decisions, newPitcherName) {
+  function buildCard(game, odds, wind, decisions, newPitcherName, milestoneNotes, noHitterInfo) {
     const away = game.teams.away;
     const home = game.teams.home;
     const st = statusInfo(game);
@@ -1375,8 +1484,12 @@
     const venue = game.venue && game.venue.name ? game.venue.name : '';
     const timeOrInning = st.cls === 'sched' ? gameTimeStr(game) : (st.cls === 'live' ? (game.linescore && game.linescore.currentInningOrdinal ? `${game.linescore.inningState || ''} ${game.linescore.currentInningOrdinal}` : st.label) : st.label);
 
-    const awayML = odds ? `<span class="ml-tag ${odds.away.favorite ? 'fav' : 'dog'}">${formatML(odds.away.moneyLine)}</span>` : '';
-    const homeML = odds ? `<span class="ml-tag ${odds.home.favorite ? 'fav' : 'dog'}">${formatML(odds.home.moneyLine)}</span>` : '';
+    if (odds) recordOpeningOdds(game.gamePk, odds);
+    const opening = openingOddsByGamePk.get(game.gamePk);
+    const awayMoveTag = odds && opening ? oddsMoveTag(game.gamePk, odds.away.moneyLine, opening.away) : '';
+    const homeMoveTag = odds && opening ? oddsMoveTag(game.gamePk, odds.home.moneyLine, opening.home) : '';
+    const awayML = odds ? `<span class="ml-tag ${odds.away.favorite ? 'fav' : 'dog'}">${formatML(odds.away.moneyLine)}</span>${awayMoveTag}` : '';
+    const homeML = odds ? `<span class="ml-tag ${odds.home.favorite ? 'fav' : 'dog'}">${formatML(odds.home.moneyLine)}</span>${homeMoveTag}` : '';
 
     let awayBadge = '', homeBadge = '';
     if (isFinal && odds) {
@@ -1402,14 +1515,20 @@
     const windTag = formatWind(wind);
     const pitchingChangeNote = newPitcherName
       ? `<div class="pitching-change-note">🔄 Pitching change — now pitching: ${newPitcherName}</div>` : '';
+    const noHitterClass = noHitterInfo ? ' no-hitter-bid' : '';
+    const noHitterNote = noHitterInfo ? `<div class="no-hitter-note">${noHitterInfo.label}</div>` : '';
+    const milestoneNote = (milestoneNotes && milestoneNotes.length)
+      ? `<div class="milestone-note">${milestoneNotes.map(m => `<div>🎯 ${m}</div>`).join('')}</div>` : '';
 
     return `
-    <div class="card${newPitcherName ? ' pitching-change' : ''}${lineupConfirmedClass}" data-gamepk="${game.gamePk}" onclick="openBoxscore(${game.gamePk})">
+    <div class="card${newPitcherName ? ' pitching-change' : ''}${lineupConfirmedClass}${noHitterClass}" data-gamepk="${game.gamePk}" onclick="openBoxscore(${game.gamePk})">
       <div class="card-top">
         <span class="status-pill ${st.cls}">${timeOrInning || st.label}${lineupBadge}</span>
         <span class="venue">${venue}${windTag ? ' · ' + windTag : ''}</span>
       </div>
       ${pitchingChangeNote}
+      ${noHitterNote}
+      ${milestoneNote}
       <table class="teams">
         <tr class="${awayWon ? 'winner' : (isFinal ? 'loser' : '')}">
           <td>
@@ -1667,6 +1786,63 @@
     return maxSpeed;
   }
 
+  // ---------- Milestone Watch (#39) ----------
+  // Flags players who crossed a round-number SEASON milestone in today's
+  // game. Confirmed live against a real boxscore: p.stats.{batting,pitching}
+  // is this single game's line, while p.seasonStats.{batting,pitching} is
+  // the season-cumulative total AS OF THIS FETCH — which already includes
+  // today's game once it's been recorded. So (seasonTotal - gameTotal)
+  // gives the player's entering-today total; any threshold that falls in
+  // (entering, seasonTotal] was crossed today. This needs zero extra
+  // network calls — it's the same boxscore already fetched below for the
+  // daily leaderboard crunch.
+  const MILESTONE_THRESHOLDS = {
+    hr: [10, 20, 30, 40, 50, 60],
+    hits: [100, 150, 200],
+    sb: [20, 30, 40, 50],
+    rbi: [100, 125, 150],
+    strikeOuts: [100, 150, 200, 250, 300],
+    wins: [10, 15, 20],
+    saves: [20, 30, 40, 50]
+  };
+  function crossedMilestones(gameVal, seasonVal, thresholds) {
+    if (!seasonVal) return [];
+    const entering = seasonVal - gameVal;
+    return thresholds.filter(t => entering < t && seasonVal >= t);
+  }
+
+  // ---------- No-hitter / perfect-game tracker (#38) ----------
+  // boxscore.teams.{side}.teamStats.pitching is the cumulative line for
+  // that TEAM's own pitching staff this game — so its "hits" field is hits
+  // ALLOWED, i.e. hits recorded by the opposing side's batters. Confirmed
+  // live against a real boxscore, including that teamStats.fielding.errors
+  // (that team's own fielding errors, which can also put an opposing
+  // batter aboard) is present at the same level. THRESHOLD_OUTS gates the
+  // badge to bids that have survived at least 5 innings (15 outs) so it
+  // doesn't fire on every scoreless 1st inning.
+  const NO_HITTER_THRESHOLD_OUTS = 15;
+  function buildNoHitterInfo(boxscore, game) {
+    for (const side of ['away', 'home']) {
+      const teamStats = boxscore.teams && boxscore.teams[side] && boxscore.teams[side].teamStats;
+      const pitching = teamStats && teamStats.pitching;
+      if (!pitching) continue;
+      const outs = ipToOuts(pitching.inningsPitched);
+      if (num(pitching.hits) > 0 || outs < NO_HITTER_THRESHOLD_OUTS) continue;
+      const fielding = teamStats.fielding;
+      const isPerfect = num(pitching.baseOnBalls) === 0 && num(pitching.hitByPitch) === 0 && (!fielding || num(fielding.errors) === 0);
+      const teamId = game.teams[side].team.id;
+      const teamAbbr = TEAM_ABBR[teamId] || game.teams[side].team.name.slice(0, 3).toUpperCase();
+      const isFinal = game.status.abstractGameState === 'Final';
+      const ip = pitching.inningsPitched;
+      const kind = isPerfect ? 'Perfect game' : 'No-hitter';
+      const label = isFinal
+        ? `⚾ ${kind.toUpperCase()}! ${teamAbbr} pitching (${ip} IP)`
+        : `⚾ ${kind} bid — ${teamAbbr} pitching (${ip} IP)`;
+      return { side, teamAbbr, isPerfect, isFinal, label };
+    }
+    return null;
+  }
+
   async function buildDailyLeaderboardData(games) {
     const battingTotals = new Map();
     const pitchingTotals = new Map();
@@ -1677,6 +1853,8 @@
     const distTotals = [];
     const pitchSpeedTotals = new Map();
     const decisionsByGamePk = new Map();
+    const milestonesByGamePk = new Map();
+    const noHitterByGamePk = new Map();
 
     const eligibleGames = games.filter(g =>
       g.status.abstractGameState === 'Live' || g.status.abstractGameState === 'Final'
@@ -1716,6 +1894,7 @@
       boxscoreFetchedStatus.set(game.gamePk, game.status.abstractGameState);
 
       const gameDecisions = {};
+      const gameMilestones = [];
       ['away', 'home'].forEach(side => {
         const teamData = boxscore.teams && boxscore.teams[side];
         if (!teamData || !teamData.players) return;
@@ -1734,6 +1913,18 @@
             cur.doubles += num(b.doubles);
             cur.triples += num(b.triples);
             battingTotals.set(p.person.id, cur);
+
+            const sb = p.seasonStats && p.seasonStats.batting;
+            if (sb) {
+              crossedMilestones(num(b.homeRuns), num(sb.homeRuns), MILESTONE_THRESHOLDS.hr).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} HR this season`));
+              crossedMilestones(num(b.hits), num(sb.hits), MILESTONE_THRESHOLDS.hits).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} hits this season`));
+              crossedMilestones(num(b.stolenBases), num(sb.stolenBases), MILESTONE_THRESHOLDS.sb).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} SB this season`));
+              crossedMilestones(num(b.rbi), num(sb.rbi), MILESTONE_THRESHOLDS.rbi).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} RBI this season`));
+            }
           }
           const pit = p.stats && p.stats.pitching;
           if (pit && Object.keys(pit).length > 0) {
@@ -1748,12 +1939,25 @@
               else if (decision.code === 'L') gameDecisions.loss = entry;
               else if (decision.code === 'SV') gameDecisions.save = entry;
             }
+
+            const sp = p.seasonStats && p.seasonStats.pitching;
+            if (sp) {
+              crossedMilestones(num(pit.strikeOuts), num(sp.strikeOuts), MILESTONE_THRESHOLDS.strikeOuts).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} K this season`));
+              crossedMilestones(num(pit.wins), num(sp.wins), MILESTONE_THRESHOLDS.wins).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) picked up win #${t} this season`));
+              crossedMilestones(num(pit.saves), num(sp.saves), MILESTONE_THRESHOLDS.saves).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) picked up save #${t} this season`));
+            }
           }
         });
       });
       if (gameDecisions.win || gameDecisions.loss || gameDecisions.save) {
         decisionsByGamePk.set(game.gamePk, gameDecisions);
       }
+      if (gameMilestones.length) milestonesByGamePk.set(game.gamePk, gameMilestones);
+      const noHitterInfo = buildNoHitterInfo(boxscore, game);
+      if (noHitterInfo) noHitterByGamePk.set(game.gamePk, noHitterInfo);
 
       if (playByPlayData) {
         const whiffs = countWhiffsByPitcher(playByPlayData);
@@ -1808,7 +2012,7 @@
       }
     }));
 
-    return { battingTotals, pitchingTotals, evTotals, distTotals, pitchSpeedTotals, decisionsByGamePk };
+    return { battingTotals, pitchingTotals, evTotals, distTotals, pitchSpeedTotals, decisionsByGamePk, milestonesByGamePk, noHitterByGamePk };
   }
 
   // Renamed from the old "topN" — it no longer truncates to a fixed count.
@@ -1932,14 +2136,15 @@
         if (!silent) {
           leaderboardSection.innerHTML = '<div class="lb-title">Daily Leaderboards</div><div class="lb-empty">Crunching today’s stat leaders…</div>';
         }
-        const { battingTotals, pitchingTotals, evTotals, distTotals, pitchSpeedTotals, decisionsByGamePk } = await buildDailyLeaderboardData(games);
+        const { battingTotals, pitchingTotals, evTotals, distTotals, pitchSpeedTotals, decisionsByGamePk, milestonesByGamePk, noHitterByGamePk } = await buildDailyLeaderboardData(games);
         if (currentDate() !== requestDate) return; // user navigated away — discard stale leaderboard
         renderLeaderboardSection(battingTotals, pitchingTotals, evTotals, distTotals, pitchSpeedTotals);
 
-        // ...then patch the W/L/SV line onto each Final game's card — this data
-        // comes out of the same boxscore fetch the leaderboard crunch just did,
-        // so no extra request is needed for it.
-        setContentHTML(`<div class="grid">${games.map(g => buildCard(g, oddsByGamePk.get(g.gamePk), windByGamePk.get(g.gamePk), decisionsByGamePk.get(g.gamePk), unacknowledgedPitchingChanges.get(g.gamePk))).join('')}</div>`);
+        // ...then patch the W/L/SV line, milestone badges, and no-hitter/
+        // perfect-game bid highlight onto each started game's card — all of
+        // this comes out of the same boxscore fetch the leaderboard crunch
+        // just did, so no extra request is needed for any of it.
+        setContentHTML(`<div class="grid">${games.map(g => buildCard(g, oddsByGamePk.get(g.gamePk), windByGamePk.get(g.gamePk), decisionsByGamePk.get(g.gamePk), unacknowledgedPitchingChanges.get(g.gamePk), milestonesByGamePk.get(g.gamePk), noHitterByGamePk.get(g.gamePk))).join('')}</div>`);
       }
 
       // Check for newly-posted lineups right away too — checkLineupUpdates()
@@ -3961,6 +4166,16 @@
 
     const [sprintMap, wrcMap] = await Promise.all([getSprintSpeedMap(season), getWrcPlusMap(season)]);
 
+    // Bullpen availability, reframed as counts (#43): reuses the exact same
+    // getTeamPriorPitcherUsage/pitcherStreak machinery that already drives
+    // the per-pitcher "2ND DAY"/"3RD DAY" fatigue badges elsewhere in the
+    // box score (see buildBoxscoreHTML/buildPitchingTable) — same cache too
+    // (teamPriorUsageCache), so this adds zero extra network calls when
+    // that section has already loaded this game. streak 3 = pitched each
+    // of the last 2 days (unavailable), 2 = pitched yesterday only
+    // (limited), 0 = fresh.
+    const officialDate = game.officialDate || game.gameDate.slice(0, 10);
+
     const sideBlocks = await Promise.all(sides.map(async side => {
       const staff = await getActiveRosterPitchers(side.teamId);
       if (!staff.length) return '';
@@ -3970,6 +4185,21 @@
         : null;
       const bullpen = staff.filter(p => p.id !== starterId);
       if (!bullpen.length) return '';
+
+      const usage = await getTeamPriorPitcherUsage(side.teamId, officialDate);
+      const availCounts = { unavailable: 0, limited: 0, fresh: 0 };
+      bullpen.forEach(p => {
+        const streak = pitcherStreak(p.id, usage);
+        if (streak === 3) availCounts.unavailable++;
+        else if (streak === 2) availCounts.limited++;
+        else availCounts.fresh++;
+      });
+      const availabilitySummary = `<div class="bullpen-availability">
+        <span class="avail-tag avail-unavailable">🔥 ${availCounts.unavailable} unavailable</span>
+        <span class="avail-tag avail-limited">⚠ ${availCounts.limited} limited</span>
+        <span class="avail-tag avail-fresh">✅ ${availCounts.fresh} fresh</span>
+        <span style="color:var(--text-dim)"> of ${bullpen.length} bullpen arms (based on the last 2 days' usage)</span>
+      </div>`;
 
       const teamData = boxscore.teams && boxscore.teams[side.key];
       const pitchedIds = new Set();
@@ -4010,6 +4240,7 @@
 
       return `<div class="bullpen-side">
         <div class="stat-label">${side.label} bullpen vs. ${side.oppLabel} lineup</div>
+        ${availabilitySummary}
         ${rendered.join('')}
       </div>`;
     }));
@@ -5031,6 +5262,369 @@
     return isNaN(n) ? null : n;
   }
 
+  // ---------- CSV parsing (Baseball Savant leaderboard CSV exports) ----------
+  // Baseball Savant's leaderboard pages (confirmed live for both
+  // outs_above_average and sprint_speed) all support a `csv=true` query
+  // param that returns the same underlying data as a plain CSV — no
+  // embedded-JSON marker scraping needed, and no CORS issues (same public,
+  // permissive-CORS host already used for the percentile-rankings pages).
+  // This is a small hand-rolled RFC4180-ish parser (handles quoted fields
+  // with embedded commas, e.g. "Abrams, CJ", and escaped "" quotes) rather
+  // than pulling in a CSV library, keeping this a single self-contained file.
+  function parseCSV(text) {
+    const rows = [];
+    let row = [], field = '', inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else inQuotes = false;
+        } else field += c;
+      } else if (c === '"') {
+        inQuotes = true;
+      } else if (c === ',') {
+        row.push(field); field = '';
+      } else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        row.push(field); field = '';
+        if (row.length > 1 || row[0] !== '') rows.push(row);
+        row = [];
+      } else {
+        field += c;
+      }
+    }
+    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+    return rows;
+  }
+  function csvToObjects(text) {
+    const rows = parseCSV(text.replace(/^﻿/, '')); // strip BOM Savant's CSVs are served with
+    if (!rows.length) return [];
+    const headers = rows[0];
+    return rows.slice(1).map(r => {
+      const obj = {};
+      headers.forEach((h, i) => { obj[h] = r[i]; });
+      return obj;
+    });
+  }
+  // Splits Savant's "Last, First" CSV name format into a display name —
+  // same convention used for the percentile-rankings JSON feeds above.
+  function csvNameToDisplay(lastFirst) {
+    const parts = (lastFirst || '').split(',');
+    return parts.length === 2 ? `${parts[1].trim()} ${parts[0].trim()}` : (lastFirst || '-');
+  }
+  // Maps Baseball Savant's full club names (as used in the OAA CSV's
+  // display_team_name column, e.g. "D-backs", "Red Sox", "---" for a
+  // player who changed teams mid-season) to the same numeric team IDs used
+  // everywhere else in this file (TEAM_ABBR), so OAA rows can share the
+  // exact same team-logo/abbreviation rendering as every other tab.
+  const TEAM_NAME_TO_ID = {
+    'Angels': 108, 'D-backs': 109, 'Orioles': 110, 'Red Sox': 111, 'Cubs': 112, 'Reds': 113,
+    'Guardians': 114, 'Rockies': 115, 'Tigers': 116, 'Astros': 117, 'Royals': 118, 'Dodgers': 119,
+    'Nationals': 120, 'Mets': 121, 'Athletics': 133, 'Pirates': 134, 'Padres': 135, 'Mariners': 136,
+    'Giants': 137, 'Cardinals': 138, 'Rays': 139, 'Rangers': 140, 'Blue Jays': 141, 'Twins': 142,
+    'Phillies': 143, 'Braves': 144, 'White Sox': 145, 'Marlins': 146, 'Yankees': 147, 'Brewers': 158
+  };
+
+  // ---------- Defensive Leaderboard / Outs Above Average (#40) ----------
+  // Baseball Savant's OAA leaderboard CSV export, confirmed live
+  // (https://baseballsavant.mlb.com/leaderboard/outs_above_average?...&csv=true)
+  // — one row per qualified fielder for the current season. min=q applies
+  // Savant's own built-in qualifier (1 attempt/team-game for 2B/SS/3B/OF,
+  // 1 per 2 team-games for 1B) so the list matches what the site itself
+  // shows by default rather than including every single-play cameo.
+  function oaaLeaderboardUrl() {
+    const year = new Date().getFullYear();
+    return `https://baseballsavant.mlb.com/leaderboard/outs_above_average?type=Fielder&startYear=${year}&endYear=${year}&split=no&team=&range=year&min=q&pos=&roles=&viz=hide&csv=true`;
+  }
+  const OAA_COLUMNS = [
+    { key: 'rank', label: 'Rk' },
+    { key: 'name', label: 'Fielder' },
+    { key: 'team', label: 'Team' },
+    { key: 'pos', label: 'Pos' },
+    { key: 'oaa', label: 'OAA' },
+    { key: 'rp', label: 'Runs Prevented' },
+    { key: 'oaaRhh', label: 'OAA vs RHH' },
+    { key: 'oaaLhh', label: 'OAA vs LHH' },
+    { key: 'actualSuccess', label: 'Actual Success%' },
+    { key: 'adjSuccess', label: 'Adj. Est. Success%' },
+    { key: 'diffSuccess', label: 'Diff%' }
+  ];
+  let oaaSort = { col: 'oaa', dir: 'desc' };
+  let oaaTeamFilter = 'ALL';
+  let oaaAllRows = [];
+  const oaaCache = new Map(); // '' -> Promise<row array> (single-entry, refetched each render)
+
+  async function fetchOaaLeaderboard() {
+    if (oaaCache.has('')) return oaaCache.get('');
+    const promise = (async () => {
+      const res = await fetch(oaaLeaderboardUrl(), { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      return csvToObjects(text);
+    })();
+    oaaCache.set('', promise);
+    try {
+      return await promise;
+    } catch (e) {
+      oaaCache.delete('');
+      throw e;
+    }
+  }
+
+  function buildOaaRows(entries) {
+    return (entries || []).map(e => {
+      const teamId = TEAM_NAME_TO_ID[e.display_team_name] || null;
+      return {
+        id: numOrNull(e.player_id),
+        name: csvNameToDisplay(e['last_name, first_name']),
+        teamId,
+        team: (teamId != null && TEAM_ABBR[teamId]) || e.display_team_name || '-',
+        pos: e.primary_pos_formatted || '-',
+        oaa: numOrNull(e.outs_above_average),
+        rp: numOrNull(e.fielding_runs_prevented),
+        oaaRhh: numOrNull(e.outs_above_average_rhh),
+        oaaLhh: numOrNull(e.outs_above_average_lhh),
+        actualSuccess: e.actual_success_rate_formatted || null,
+        adjSuccess: e.adj_estimated_success_rate_formatted || null,
+        diffSuccess: e.diff_success_rate_formatted || null
+      };
+    });
+  }
+
+  function getLbTeams(rows) {
+    // OAA's display_team_name comes through as literal "---" for a player
+    // Savant doesn't currently have on a single team's roster (traded mid-
+    // season, minor-league-only, etc.) — exclude that from the filter
+    // dropdown's team list (there's no real team to filter by), though the
+    // row itself still renders with "---" in its Team column.
+    return [...new Set(rows.map(r => r.team))].filter(t => t && t !== '-' && t !== '---').sort();
+  }
+
+  function sortLbRows(rows, sortState) {
+    const dir = sortState.dir === 'asc' ? 1 : -1;
+    const key = sortState.col;
+    return rows.slice().sort((a, b) => {
+      let av = a[key], bv = b[key];
+      // The three "...Success%" fields are formatted strings like "78%" —
+      // strip the % and compare numerically rather than lexically so
+      // "9%" doesn't sort ahead of "78%".
+      if (typeof av === 'string' && /^-?\d+%$/.test(av)) av = parseFloat(av);
+      if (typeof bv === 'string' && /^-?\d+%$/.test(bv)) bv = parseFloat(bv);
+      const aMissing = av == null || (typeof av === 'number' && isNaN(av));
+      const bMissing = bv == null || (typeof bv === 'number' && isNaN(bv));
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+      if (typeof av === 'string') return av.localeCompare(bv) * dir;
+      return (av - bv) * dir;
+    });
+  }
+
+  function buildOaaTable(rows) {
+    const headerCells = OAA_COLUMNS.map(c => {
+      const active = oaaSort.col === c.key;
+      const arrow = active ? (oaaSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+      return `<th data-sort-key="${c.key}" class="sortable-col${active ? ' active-sort' : ''}">${c.label}${arrow}</th>`;
+    }).join('');
+    const sorted = sortLbRows(rows, oaaSort);
+    const body = sorted.map((r, i) => {
+      const logo = r.teamId != null ? `<img src="${logoUrl(r.teamId)}" onerror="this.style.display='none'">` : '';
+      return `<tr>
+        <td>${i + 1}</td>
+        <td class="prospect-name">${savantPlayerLink(r.id, r.name)}</td>
+        <td>${logo}${r.team}</td>
+        <td>${r.pos}</td>
+        <td${r.oaa > 0 ? ' class="delta-pos"' : (r.oaa < 0 ? ' class="delta-neg"' : '')}>${r.oaa != null ? r.oaa : '-'}</td>
+        <td>${r.rp != null ? r.rp : '-'}</td>
+        <td>${r.oaaRhh != null ? r.oaaRhh : '-'}</td>
+        <td>${r.oaaLhh != null ? r.oaaLhh : '-'}</td>
+        <td>${r.actualSuccess || '-'}</td>
+        <td>${r.adjSuccess || '-'}</td>
+        <td>${r.diffSuccess || '-'}</td>
+      </tr>`;
+    }).join('');
+    return `<table class="prospects-table">
+      <thead><tr>${headerCells}</tr></thead>
+      <tbody>${body || `<tr><td colspan="${OAA_COLUMNS.length}" class="lb-empty">No data</td></tr>`}</tbody>
+    </table>
+    <div class="standings-note">Source: Baseball Savant Outs Above Average (Statcast), ${new Date().getFullYear()} season, qualified fielders. OAA is the cumulative outs saved (+) or cost (-) above what an average fielder would be expected to make, given the difficulty of every play they were involved in. Click a column header to sort, or filter by team above.</div>`;
+  }
+
+  function renderOaaTableInto(allRows) {
+    oaaAllRows = allRows;
+    const teams = getLbTeams(allRows);
+    const teamOptions = ['<option value="ALL">All Teams</option>']
+      .concat(teams.map(t => `<option value="${t}"${t === oaaTeamFilter ? ' selected' : ''}>${t}</option>`))
+      .join('');
+    const filtered = oaaTeamFilter === 'ALL' ? allRows : allRows.filter(r => r.team === oaaTeamFilter);
+    oaaContent.innerHTML = `
+      <div class="prospects-controls">
+        <select id="oaaTeamSelect">${teamOptions}</select>
+      </div>
+      <div class="prospects-table-wrap">${buildOaaTable(filtered)}</div>`;
+    document.getElementById('oaaTeamSelect').addEventListener('change', (e) => {
+      oaaTeamFilter = e.target.value;
+      renderOaaTableInto(oaaAllRows);
+    });
+    oaaContent.querySelectorAll('th.sortable-col').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.getAttribute('data-sort-key');
+        if (oaaSort.col === key) {
+          oaaSort.dir = oaaSort.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          oaaSort = { col: key, dir: key === 'name' || key === 'team' || key === 'pos' ? 'asc' : 'desc' };
+        }
+        renderOaaTableInto(oaaAllRows);
+      });
+    });
+  }
+
+  async function renderOaaView() {
+    if (!oaaContent.querySelector('table')) {
+      oaaContent.innerHTML = '<div class="spinner">Loading defensive leaderboard…</div>';
+    }
+    try {
+      const data = await fetchOaaLeaderboard();
+      const rows = buildOaaRows(data);
+      renderOaaTableInto(rows);
+    } catch (err) {
+      oaaContent.innerHTML = `<div class="empty">Couldn't load defensive leaderboard: ${err.message}</div>`;
+    }
+  }
+
+  // ---------- Sprint Speed / Baserunning (#41) ----------
+  // Baseball Savant's sprint speed leaderboard CSV export, confirmed live
+  // (https://baseballsavant.mlb.com/leaderboard/sprint_speed?...&csv=true).
+  // Unlike the OAA CSV, this one already includes a numeric team_id column
+  // that lines up exactly with this file's own TEAM_ABBR keys (confirmed
+  // against several rows, e.g. team_id 147 = NYY, 133 = ATH) — no name
+  // lookup needed here.
+  function sprintLeaderboardUrl() {
+    const year = new Date().getFullYear();
+    return `https://baseballsavant.mlb.com/leaderboard/sprint_speed?year=${year}&position=&team=&min=0&csv=true`;
+  }
+  const SPRINT_COLUMNS = [
+    { key: 'rank', label: 'Rk' },
+    { key: 'name', label: 'Player' },
+    { key: 'team', label: 'Team' },
+    { key: 'pos', label: 'Pos' },
+    { key: 'age', label: 'Age' },
+    { key: 'sprintSpeed', label: 'Sprint Speed (ft/s)' },
+    { key: 'bolts', label: 'Bolts' },
+    { key: 'competitiveRuns', label: 'Competitive Runs' },
+    { key: 'hpTo1b', label: 'HP-to-1B' }
+  ];
+  let sprintSort = { col: 'sprintSpeed', dir: 'desc' };
+  let sprintTeamFilter = 'ALL';
+  let sprintAllRows = [];
+  const sprintCache = new Map(); // '' -> Promise<row array> (single-entry, refetched each render)
+
+  async function fetchSprintLeaderboard() {
+    if (sprintCache.has('')) return sprintCache.get('');
+    const promise = (async () => {
+      const res = await fetch(sprintLeaderboardUrl(), { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      return csvToObjects(text);
+    })();
+    sprintCache.set('', promise);
+    try {
+      return await promise;
+    } catch (e) {
+      sprintCache.delete('');
+      throw e;
+    }
+  }
+
+  function buildSprintRows(entries) {
+    return (entries || []).map(e => {
+      const teamId = numOrNull(e.team_id);
+      return {
+        id: numOrNull(e.player_id),
+        name: csvNameToDisplay(e['last_name, first_name']),
+        teamId,
+        team: (teamId != null && TEAM_ABBR[teamId]) || e.team || '-',
+        pos: e.position || '-',
+        age: numOrNull(e.age),
+        sprintSpeed: numOrNull(e.sprint_speed),
+        bolts: numOrNull(e.bolts),
+        competitiveRuns: numOrNull(e.competitive_runs),
+        hpTo1b: numOrNull(e.hp_to_1b)
+      };
+    });
+  }
+
+  function buildSprintTable(rows) {
+    const headerCells = SPRINT_COLUMNS.map(c => {
+      const active = sprintSort.col === c.key;
+      const arrow = active ? (sprintSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+      return `<th data-sort-key="${c.key}" class="sortable-col${active ? ' active-sort' : ''}">${c.label}${arrow}</th>`;
+    }).join('');
+    const sorted = sortLbRows(rows, sprintSort);
+    const body = sorted.map((r, i) => {
+      const logo = r.teamId != null ? `<img src="${logoUrl(r.teamId)}" onerror="this.style.display='none'">` : '';
+      return `<tr>
+        <td>${i + 1}</td>
+        <td class="prospect-name">${savantPlayerLink(r.id, r.name)}</td>
+        <td>${logo}${r.team}</td>
+        <td>${r.pos}</td>
+        <td>${r.age != null ? r.age : '-'}</td>
+        <td>${r.sprintSpeed != null ? r.sprintSpeed.toFixed(1) : '-'}</td>
+        <td>${r.bolts != null ? r.bolts : '-'}</td>
+        <td>${r.competitiveRuns != null ? r.competitiveRuns : '-'}</td>
+        <td>${r.hpTo1b != null ? r.hpTo1b.toFixed(2) : '-'}</td>
+      </tr>`;
+    }).join('');
+    return `<table class="prospects-table">
+      <thead><tr>${headerCells}</tr></thead>
+      <tbody>${body || `<tr><td colspan="${SPRINT_COLUMNS.length}" class="lb-empty">No data</td></tr>`}</tbody>
+    </table>
+    <div class="standings-note">Source: Baseball Savant Sprint Speed leaderboard (Statcast), ${new Date().getFullYear()} season. Sprint Speed is "feet per second in a player's fastest one-second window," measured on qualifying competitive runs. A Bolt is any run clocked at 30+ ft/sec. Click a column header to sort, or filter by team above.</div>`;
+  }
+
+  function renderSprintTableInto(allRows) {
+    sprintAllRows = allRows;
+    const teams = getLbTeams(allRows);
+    const teamOptions = ['<option value="ALL">All Teams</option>']
+      .concat(teams.map(t => `<option value="${t}"${t === sprintTeamFilter ? ' selected' : ''}>${t}</option>`))
+      .join('');
+    const filtered = sprintTeamFilter === 'ALL' ? allRows : allRows.filter(r => r.team === sprintTeamFilter);
+    sprintContent.innerHTML = `
+      <div class="prospects-controls">
+        <select id="sprintTeamSelect">${teamOptions}</select>
+      </div>
+      <div class="prospects-table-wrap">${buildSprintTable(filtered)}</div>`;
+    document.getElementById('sprintTeamSelect').addEventListener('change', (e) => {
+      sprintTeamFilter = e.target.value;
+      renderSprintTableInto(sprintAllRows);
+    });
+    sprintContent.querySelectorAll('th.sortable-col').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.getAttribute('data-sort-key');
+        if (sprintSort.col === key) {
+          sprintSort.dir = sprintSort.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          sprintSort = { col: key, dir: key === 'name' || key === 'team' || key === 'pos' ? 'asc' : 'desc' };
+        }
+        renderSprintTableInto(sprintAllRows);
+      });
+    });
+  }
+
+  async function renderSprintView() {
+    if (!sprintContent.querySelector('table')) {
+      sprintContent.innerHTML = '<div class="spinner">Loading sprint speed leaderboard…</div>';
+    }
+    try {
+      const data = await fetchSprintLeaderboard();
+      const rows = buildSprintRows(data);
+      renderSprintTableInto(rows);
+    } catch (err) {
+      sprintContent.innerHTML = `<div class="empty">Couldn't load sprint speed leaderboard: ${err.message}</div>`;
+    }
+  }
+
   function buildPitchExpStatsRows(entries) {
     return (entries || []).map(e => ({
       id: e.entity_id,
@@ -5348,6 +5942,8 @@
     prospectsView.classList.toggle('hidden', tab !== 'prospects');
     pitchExpStatsView.classList.toggle('hidden', tab !== 'pitchexpstats');
     batExpStatsView.classList.toggle('hidden', tab !== 'batexpstats');
+    oaaView.classList.toggle('hidden', tab !== 'oaa');
+    sprintView.classList.toggle('hidden', tab !== 'sprint');
     scoresTabBtn.classList.toggle('active', tab === 'scores');
     standingsTabBtn.classList.toggle('active', tab === 'standings');
     pctlTabBtn.classList.toggle('active', tab === 'pctl');
@@ -5356,6 +5952,8 @@
     prospectsTabBtn.classList.toggle('active', tab === 'prospects');
     pitchExpStatsTabBtn.classList.toggle('active', tab === 'pitchexpstats');
     batExpStatsTabBtn.classList.toggle('active', tab === 'batexpstats');
+    oaaTabBtn.classList.toggle('active', tab === 'oaa');
+    sprintTabBtn.classList.toggle('active', tab === 'sprint');
     if (tab === 'standings') loadStandings();
     if (tab === 'pctl') renderPctlView();
     if (tab === 'pitcherpctl') renderPitcherPctlView();
@@ -5363,6 +5961,8 @@
     if (tab === 'prospects') renderProspectsView();
     if (tab === 'pitchexpstats') renderPitchExpStatsView();
     if (tab === 'batexpstats') renderBatExpStatsView();
+    if (tab === 'oaa') renderOaaView();
+    if (tab === 'sprint') renderSprintView();
   }
 
   function showSprayTip(evt, text) {
@@ -5451,6 +6051,8 @@
   prospectsTabBtn.addEventListener('click', () => showTab('prospects'));
   pitchExpStatsTabBtn.addEventListener('click', () => showTab('pitchexpstats'));
   batExpStatsTabBtn.addEventListener('click', () => showTab('batexpstats'));
+  oaaTabBtn.addEventListener('click', () => showTab('oaa'));
+  sprintTabBtn.addEventListener('click', () => showTab('sprint'));
 
   // Auto-refresh every 15s if viewing today's date, to catch live score/
   // inning/pitching-change updates as close to real time as MLB's public
@@ -5493,6 +6095,12 @@
     }
     if (!pitcherPctlView.classList.contains('hidden')) {
       renderPitcherPctlView();
+    }
+    if (!oaaView.classList.contains('hidden')) {
+      renderOaaView();
+    }
+    if (!sprintView.classList.contains('hidden')) {
+      renderSprintView();
     }
   }, 60000);
 
