@@ -4136,7 +4136,18 @@
 
     const note = `<div class="spray-note">Career batter-vs-pitcher totals. *SB is each batter's ${season} season total (MLB's batter-vs-pitcher split doesn't track stolen bases specifically). Sprint speed and percentile via Baseball Savant Statcast (percentile computed among all ${season} qualifiers). wRC+ (100 = league average) and WAR via FanGraphs. "AVG vs Top Pitches" is each batter's ${season} season batting average against the pitcher's 3 most-used pitch types league-wide (Baseball Savant), not specific to facing this pitcher.${usingPostedLineups ? ' Using today\'s confirmed starting lineups.' : ' Lineups aren\'t posted yet — showing each team\'s active-roster hitters instead.'}</div>`;
 
-    return conflictNote + lineupsSection + note + batterySection + sections.join('');
+    // Bullpen availability + look-ahead BvP history, shown pre-game too (not
+    // just once the game goes Live/Final — see buildBoxscoreHTML's own call
+    // to this same function). boxscore is null here since the game hasn't
+    // started; buildBullpenMatchupsSection handles that (no "pitched
+    // tonight" tags yet, which is correct pre-game). dueUpIds is all-null
+    // for the same reason — there's no "at bat/on deck" yet before first pitch.
+    let bullpenSection = '';
+    try {
+      bullpenSection = await buildBullpenMatchupsSection(game, null, season, { atBat: null, onDeck: null, inHole: null });
+    } catch (e) { /* best-effort — don't fail the whole modal over this */ }
+
+    return conflictNote + lineupsSection + note + batterySection + sections.join('') + bullpenSection;
   }
 
   // ---------- Bullpen (non-starter) matchup history — live/final games ----------
@@ -4201,7 +4212,12 @@
         <span style="color:var(--text-dim)"> of ${bullpen.length} bullpen arms (based on the last 2 days' usage)</span>
       </div>`;
 
-      const teamData = boxscore.teams && boxscore.teams[side.key];
+      // boxscore is null pre-game (buildMatchupHistorySection calls this
+      // section before first pitch, purely for the availability counts +
+      // BvP look-ahead — see its call site) — no one has "pitched tonight"
+      // yet in that case, so pitchedIds is correctly just empty rather than
+      // throwing on a null boxscore.
+      const teamData = boxscore && boxscore.teams && boxscore.teams[side.key];
       const pitchedIds = new Set();
       if (teamData && teamData.players) {
         Object.values(teamData.players).forEach(p => {
@@ -4214,34 +4230,43 @@
       const oppBatters = gameData
         ? await getExpectedBatters(side.oppKey, gameData, side.oppTeamId)
         : await getActiveRosterHitters(side.oppTeamId);
-      if (!oppBatters.length) return '';
 
-      const pitcherBlocks = await Promise.all(bullpen.map(async pitcher => {
-        const rows = await Promise.all(oppBatters.map(async b => {
-          const [stat, seasonStat] = await Promise.all([
-            getBvPStats(b.id, pitcher.id),
-            getSeasonStolenBaseDefense(b.id, 'hitting', season)
-          ]);
-          return { batter: b, stat, seasonStat, sprint: sprintMap.get(b.id) || null, vsPitchAvgs: [], batAdv: wrcMap.get(b.id) || null };
+      // The availability summary above doesn't depend on any of this BvP
+      // lookup — it's allowed to render on its own even when there's no
+      // opposing-lineup data yet or no reliever has a qualifying AB against
+      // it, so a bullpen with zero career history against tonight's lineup
+      // (e.g. an interleague series, or a team full of rookies) still shows
+      // its fatigue counts instead of the whole section silently vanishing.
+      let matchupsHtml = '';
+      if (oppBatters.length) {
+        const pitcherBlocks = await Promise.all(bullpen.map(async pitcher => {
+          const rows = await Promise.all(oppBatters.map(async b => {
+            const [stat, seasonStat] = await Promise.all([
+              getBvPStats(b.id, pitcher.id),
+              getSeasonStolenBaseDefense(b.id, 'hitting', season)
+            ]);
+            return { batter: b, stat, seasonStat, sprint: sprintMap.get(b.id) || null, vsPitchAvgs: [], batAdv: wrcMap.get(b.id) || null };
+          }));
+          const totalAB = rows.reduce((sum, r) => sum + (r.stat ? num(r.stat.atBats) : 0), 0);
+          if (totalAB === 0) return '';
+          const tag = pitchedIds.has(pitcher.id)
+            ? '<span class="bullpen-tag bullpen-tag-used">Pitched tonight</span>'
+            : '<span class="bullpen-tag">Bullpen</span>';
+          return `<details class="bullpen-pitcher">
+            <summary>${savantPlayerLink(pitcher.id, pitcher.name, { stopPropagation: true })} ${tag} <span style="color:var(--text-dim)">${totalAB} career AB vs this lineup</span></summary>
+            ${buildSortableMatchupBlock(rows, [], dueUpIds)}
+          </details>`;
         }));
-        const totalAB = rows.reduce((sum, r) => sum + (r.stat ? num(r.stat.atBats) : 0), 0);
-        if (totalAB === 0) return '';
-        const tag = pitchedIds.has(pitcher.id)
-          ? '<span class="bullpen-tag bullpen-tag-used">Pitched tonight</span>'
-          : '<span class="bullpen-tag">Bullpen</span>';
-        return `<details class="bullpen-pitcher">
-          <summary>${savantPlayerLink(pitcher.id, pitcher.name, { stopPropagation: true })} ${tag} <span style="color:var(--text-dim)">${totalAB} career AB vs this lineup</span></summary>
-          ${buildSortableMatchupBlock(rows, [], dueUpIds)}
-        </details>`;
-      }));
-
-      const rendered = pitcherBlocks.filter(Boolean);
-      if (!rendered.length) return '';
+        matchupsHtml = pitcherBlocks.filter(Boolean).join('');
+      }
+      if (!matchupsHtml) {
+        matchupsHtml = '<div class="lb-empty" style="font-size:12px;padding:6px 0;">No career at-bats vs. this lineup on record for this bullpen yet.</div>';
+      }
 
       return `<div class="bullpen-side">
         <div class="stat-label">${side.label} bullpen vs. ${side.oppLabel} lineup</div>
         ${availabilitySummary}
-        ${rendered.join('')}
+        ${matchupsHtml}
       </div>`;
     }));
 
