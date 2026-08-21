@@ -3741,13 +3741,14 @@
       try {
         const target = `https://tjstats.ca/?tjs_data=leaderboard_sp&season=${season}&level=mlb&game_type=R&min_pitches=1&limit=10000`;
         const res = await fetch('https://r.jina.ai/' + target);
-        if (!res.ok) return new Map();
+        if (!res.ok) throw new Error('bad status ' + res.status);
         const text = await res.text();
         const start = text.indexOf('{');
         const end = text.lastIndexOf('}');
-        if (start === -1 || end === -1) return new Map();
+        if (start === -1 || end === -1) throw new Error('no JSON in response');
         const data = JSON.parse(text.slice(start, end + 1));
         const players = (data && data.data && data.data.players) || [];
+        if (!players.length) throw new Error('empty leaderboard');
         const map = new Map();
         for (const p of players) {
           const byPitch = {};
@@ -3758,7 +3759,14 @@
           map.set(p.pitcher_id, { overall: p.stuff_overall, byPitch });
         }
         return map;
-      } catch (e) { return new Map(); }
+      } catch (e) {
+        // Don't let a transient proxy hiccup or timeout cache an empty
+        // result forever — clear the cache entry so the next call (e.g.
+        // the next 15s auto-refresh) retries the fetch instead of leaving
+        // Stuff+ blank for the rest of the session.
+        stuffPlusCache.delete(cacheKey);
+        return new Map();
+      }
     })();
     stuffPlusCache.set(cacheKey, promise);
     return promise;
