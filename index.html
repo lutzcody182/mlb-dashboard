@@ -1820,6 +1820,75 @@
     return thresholds.filter(t => entering < t && seasonVal >= t);
   }
 
+  // ---------- Career Milestone Watch ----------
+  // Same "did today's game push a cumulative total past a round number"
+  // idea as the season Milestone Watch above, but for career totals —
+  // which the boxscore endpoint doesn't include (it only has this-game and
+  // this-season splits). To get a career "entering today" total without an
+  // extra fetch on every single poll, this pulls each player's year-by-year
+  // regular-season splits (stats=yearByYear) ONCE per player per browser
+  // session and sums every season except the current one — that sum can
+  // never change (past seasons are final), so caching it forever for the
+  // rest of the session is always correct, not just an optimization.
+  // Combined with the boxscore's own this-game/this-season numbers (already
+  // trusted elsewhere in this file for the season version of this feature),
+  // that gives an accurate entering-today career total: careerPriorSeasons
+  // + (thisSeasonTotal - thisGameTotal). This only fires a lookup for
+  // players who actually recorded a stat line in today's game (same gate as
+  // the season version), and only once per player thanks to the cache — so
+  // a normal day adds on the order of tens of extra requests total (spread
+  // out as games start), not one per poll.
+  const CAREER_MILESTONE_THRESHOLDS = {
+    hr: [300, 400, 500, 600, 700],
+    hits: [1500, 2000, 2500, 3000, 3500],
+    sb: [200, 300, 400, 500],
+    rbi: [1000, 1500, 2000],
+    strikeOuts: [1500, 2000, 2500, 3000, 3500],
+    wins: [100, 150, 200, 250, 300],
+    saves: [100, 200, 300, 400, 500, 600]
+  };
+  function crossedThresholdDirect(entering, after, thresholds) {
+    if (!after) return [];
+    return thresholds.filter(t => entering < t && after >= t);
+  }
+  const careerPriorSeasonsCache = new Map(); // "personId|group" -> Promise<totals as of end of last season>
+  async function getCareerPriorSeasons(personId, group, currentYear) {
+    const cacheKey = `${personId}|${group}`;
+    if (careerPriorSeasonsCache.has(cacheKey)) return careerPriorSeasonsCache.get(cacheKey);
+    const promise = (async () => {
+      const totals = group === 'pitching'
+        ? { wins: 0, saves: 0, strikeOuts: 0 }
+        : { hits: 0, homeRuns: 0, stolenBases: 0, rbi: 0 };
+      try {
+        const res = await fetch(`https://statsapi.mlb.com/api/v1/people/${personId}/stats?stats=yearByYear&group=${group}`);
+        if (!res.ok) return totals;
+        const data = await res.json();
+        const splits = (data.stats && data.stats[0] && data.stats[0].splits) || [];
+        splits.forEach(s => {
+          // gameType 'R' = regular season, matching every other stat this
+          // file uses. Skip the current (in-progress) year entirely — that
+          // part comes from the boxscore's own live seasonStats instead.
+          if (s.gameType && s.gameType !== 'R') return;
+          if (String(s.season) === String(currentYear)) return;
+          const st = s.stat || {};
+          if (group === 'pitching') {
+            totals.wins += num(st.wins);
+            totals.saves += num(st.saves);
+            totals.strikeOuts += num(st.strikeOuts);
+          } else {
+            totals.hits += num(st.hits);
+            totals.homeRuns += num(st.homeRuns);
+            totals.stolenBases += num(st.stolenBases);
+            totals.rbi += num(st.rbi);
+          }
+        });
+      } catch (e) { /* best-effort — career milestones just won't fire for this player */ }
+      return totals;
+    })();
+    careerPriorSeasonsCache.set(cacheKey, promise);
+    return promise;
+  }
+
   // ---------- No-hitter / perfect-game tracker (#38) ----------
   // boxscore.teams.{side}.teamStats.pitching is the cumulative line for
   // that TEAM's own pitching staff this game — so its "hits" field is hits
@@ -1904,13 +1973,14 @@
 
       const gameDecisions = {};
       const gameMilestones = [];
-      ['away', 'home'].forEach(side => {
+      const milestoneYear = (game.officialDate || game.gameDate.slice(0, 10)).slice(0, 4);
+      await Promise.all(['away', 'home'].map(async side => {
         const teamData = boxscore.teams && boxscore.teams[side];
         if (!teamData || !teamData.players) return;
         const teamId = game.teams[side].team.id;
         const teamAbbr = TEAM_ABBR[teamId] || game.teams[side].team.name.slice(0, 3).toUpperCase();
 
-        Object.values(teamData.players).forEach(p => {
+        await Promise.all(Object.values(teamData.players).map(async p => {
           if (!p.person) return;
           const b = p.stats && p.stats.batting;
           if (b && Object.keys(b).length > 0) {
@@ -1933,6 +2003,23 @@
                 gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} SB this season`));
               crossedMilestones(num(b.rbi), num(sb.rbi), MILESTONE_THRESHOLDS.rbi).forEach(t =>
                 gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} RBI this season`));
+
+              // Career milestones — same crossing check, but against
+              // careerPriorSeasons + this-season-total instead of just the
+              // season total. One lazy, session-cached lookup per batter.
+              const careerPrior = await getCareerPriorSeasons(p.person.id, 'hitting', milestoneYear);
+              const hrAfter = careerPrior.homeRuns + num(sb.homeRuns), hrEnter = hrAfter - num(b.homeRuns);
+              crossedThresholdDirect(hrEnter, hrAfter, CAREER_MILESTONE_THRESHOLDS.hr).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} HR for his career`));
+              const hitsAfter = careerPrior.hits + num(sb.hits), hitsEnter = hitsAfter - num(b.hits);
+              crossedThresholdDirect(hitsEnter, hitsAfter, CAREER_MILESTONE_THRESHOLDS.hits).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} hits for his career`));
+              const sbAfter = careerPrior.stolenBases + num(sb.stolenBases), sbEnter = sbAfter - num(b.stolenBases);
+              crossedThresholdDirect(sbEnter, sbAfter, CAREER_MILESTONE_THRESHOLDS.sb).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} SB for his career`));
+              const rbiAfter = careerPrior.rbi + num(sb.rbi), rbiEnter = rbiAfter - num(b.rbi);
+              crossedThresholdDirect(rbiEnter, rbiAfter, CAREER_MILESTONE_THRESHOLDS.rbi).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} RBI for his career`));
             }
           }
           const pit = p.stats && p.stats.pitching;
@@ -1957,10 +2044,21 @@
                 gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) picked up win #${t} this season`));
               crossedMilestones(num(pit.saves), num(sp.saves), MILESTONE_THRESHOLDS.saves).forEach(t =>
                 gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) picked up save #${t} this season`));
+
+              const careerPriorP = await getCareerPriorSeasons(p.person.id, 'pitching', milestoneYear);
+              const kAfter = careerPriorP.strikeOuts + num(sp.strikeOuts), kEnter = kAfter - num(pit.strikeOuts);
+              crossedThresholdDirect(kEnter, kAfter, CAREER_MILESTONE_THRESHOLDS.strikeOuts).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) reached ${t} K for his career`));
+              const winsAfter = careerPriorP.wins + num(sp.wins), winsEnter = winsAfter - num(pit.wins);
+              crossedThresholdDirect(winsEnter, winsAfter, CAREER_MILESTONE_THRESHOLDS.wins).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) picked up career win #${t}`));
+              const savesAfter = careerPriorP.saves + num(sp.saves), savesEnter = savesAfter - num(pit.saves);
+              crossedThresholdDirect(savesEnter, savesAfter, CAREER_MILESTONE_THRESHOLDS.saves).forEach(t =>
+                gameMilestones.push(`${savantPlayerLink(p.person.id, p.person.fullName)} (${teamAbbr}) picked up career save #${t}`));
             }
           }
-        });
-      });
+        }));
+      }));
       if (gameDecisions.win || gameDecisions.loss || gameDecisions.save) {
         decisionsByGamePk.set(game.gamePk, gameDecisions);
       }
