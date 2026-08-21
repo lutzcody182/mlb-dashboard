@@ -4216,14 +4216,22 @@
     const homeCatcher = homeBatters.find(b => b.pos === 'C') || null;
     const awayCatcher = awayBatters.find(b => b.pos === 'C') || null;
 
-    const batterySection = await buildBatterySBSection(game, gameData, awayPitcher, homePitcher, awayCatcher, homeCatcher);
-
     const season = gameData.season || (game.officialDate ? game.officialDate.slice(0, 4) : String(new Date().getFullYear()));
-    const [sprintMap, wrcMap] = await Promise.all([getSprintSpeedMap(season), getWrcPlusMap(season)]);
 
-    const sections = [];
-    if (awayPitcher) {
-      const awayTopPitches = await getTopPitchTypes(awayPitcher.id, season, 3);
+    // Everything below is independent of everything else at this point (all
+    // it shares is homeBatters/awayBatters/season, already in hand), so it's
+    // run as one batch of concurrent work instead of four sequential stages
+    // (battery section, then sprint/wRC+ maps, then away matchup, then home
+    // matchup, then bullpen) — that sequential chain was the main reason this
+    // modal felt slow to open, since each stage's network calls waited on the
+    // previous stage to fully finish before starting.
+    const buildAwaySection = async () => {
+      if (!awayPitcher) return null;
+      const [awayTopPitches, sprintMap, wrcMap] = await Promise.all([
+        getTopPitchTypes(awayPitcher.id, season, 3),
+        getSprintSpeedMap(season),
+        getWrcPlusMap(season)
+      ]);
       const awayPitchAvgMaps = await Promise.all(awayTopPitches.map(pt => getBatterAvgVsPitchType(season, pt.code)));
       const rows = await Promise.all(homeBatters.map(async b => {
         const [stat, seasonStat] = await Promise.all([
@@ -4233,10 +4241,15 @@
         const vsPitchAvgs = awayPitchAvgMaps.map(m => (m.has(b.id) ? m.get(b.id) : null));
         return { batter: b, stat, seasonStat, sprint: sprintMap.get(b.id) || null, vsPitchAvgs, batAdv: wrcMap.get(b.id) || null };
       }));
-      sections.push(buildMatchupTable(`${game.teams.home.team.name} batters vs. ${savantPlayerLink(awayPitcher.id, awayPitcher.fullName)} (P)`, rows, awayTopPitches));
-    }
-    if (homePitcher) {
-      const homeTopPitches = await getTopPitchTypes(homePitcher.id, season, 3);
+      return buildMatchupTable(`${game.teams.home.team.name} batters vs. ${savantPlayerLink(awayPitcher.id, awayPitcher.fullName)} (P)`, rows, awayTopPitches);
+    };
+    const buildHomeSection = async () => {
+      if (!homePitcher) return null;
+      const [homeTopPitches, sprintMap, wrcMap] = await Promise.all([
+        getTopPitchTypes(homePitcher.id, season, 3),
+        getSprintSpeedMap(season),
+        getWrcPlusMap(season)
+      ]);
       const homePitchAvgMaps = await Promise.all(homeTopPitches.map(pt => getBatterAvgVsPitchType(season, pt.code)));
       const rows = await Promise.all(awayBatters.map(async b => {
         const [stat, seasonStat] = await Promise.all([
@@ -4246,21 +4259,29 @@
         const vsPitchAvgs = homePitchAvgMaps.map(m => (m.has(b.id) ? m.get(b.id) : null));
         return { batter: b, stat, seasonStat, sprint: sprintMap.get(b.id) || null, vsPitchAvgs, batAdv: wrcMap.get(b.id) || null };
       }));
-      sections.push(buildMatchupTable(`${game.teams.away.team.name} batters vs. ${savantPlayerLink(homePitcher.id, homePitcher.fullName)} (P)`, rows, homeTopPitches));
-    }
-
-    const note = `<div class="spray-note">Career batter-vs-pitcher totals. *SB is each batter's ${season} season total (MLB's batter-vs-pitcher split doesn't track stolen bases specifically). Sprint speed and percentile via Baseball Savant Statcast (percentile computed among all ${season} qualifiers). wRC+ (100 = league average) and WAR via FanGraphs. "AVG vs Top Pitches" is each batter's ${season} season batting average against the pitcher's 3 most-used pitch types league-wide (Baseball Savant), not specific to facing this pitcher.${usingPostedLineups ? ' Using today\'s confirmed starting lineups.' : ' Lineups aren\'t posted yet — showing each team\'s active-roster hitters instead.'}</div>`;
-
+      return buildMatchupTable(`${game.teams.away.team.name} batters vs. ${savantPlayerLink(homePitcher.id, homePitcher.fullName)} (P)`, rows, homeTopPitches);
+    };
     // Bullpen availability + look-ahead BvP history, shown pre-game too (not
     // just once the game goes Live/Final — see buildBoxscoreHTML's own call
     // to this same function). boxscore is null here since the game hasn't
     // started; buildBullpenMatchupsSection handles that (no "pitched
     // tonight" tags yet, which is correct pre-game). dueUpIds is all-null
     // for the same reason — there's no "at bat/on deck" yet before first pitch.
-    let bullpenSection = '';
-    try {
-      bullpenSection = await buildBullpenMatchupsSection(game, null, season, { atBat: null, onDeck: null, inHole: null });
-    } catch (e) { /* best-effort — don't fail the whole modal over this */ }
+    const buildBullpen = async () => {
+      try {
+        return await buildBullpenMatchupsSection(game, null, season, { atBat: null, onDeck: null, inHole: null });
+      } catch (e) { return ''; /* best-effort — don't fail the whole modal over this */ }
+    };
+
+    const [batterySection, awaySectionHtml, homeSectionHtml, bullpenSection] = await Promise.all([
+      buildBatterySBSection(game, gameData, awayPitcher, homePitcher, awayCatcher, homeCatcher),
+      buildAwaySection(),
+      buildHomeSection(),
+      buildBullpen()
+    ]);
+    const sections = [awaySectionHtml, homeSectionHtml].filter(Boolean);
+
+    const note = `<div class="spray-note">Career batter-vs-pitcher totals. *SB is each batter's ${season} season total (MLB's batter-vs-pitcher split doesn't track stolen bases specifically). Sprint speed and percentile via Baseball Savant Statcast (percentile computed among all ${season} qualifiers). wRC+ (100 = league average) and WAR via FanGraphs. "AVG vs Top Pitches" is each batter's ${season} season batting average against the pitcher's 3 most-used pitch types league-wide (Baseball Savant), not specific to facing this pitcher.${usingPostedLineups ? ' Using today\'s confirmed starting lineups.' : ' Lineups aren\'t posted yet — showing each team\'s active-roster hitters instead.'}</div>`;
 
     return conflictNote + lineupsSection + note + batterySection + sections.join('') + bullpenSection;
   }
