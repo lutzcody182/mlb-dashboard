@@ -1262,6 +1262,26 @@
     return new Date(y, m - 1, d);
   }
 
+  // "Today" for this dashboard's purposes doesn't flip at midnight — a game
+  // that started before midnight keeps its officialDate pinned to the day it
+  // started no matter how late it runs (extra innings, rain delay, a 10pm ET
+  // West Coast start), so the dashboard's own idea of "today" stays on that
+  // same date until DAY_START_HOUR the next morning, safely past when even a
+  // long game would have ended. This is what makes the "Today" view — and
+  // the auto-refresh / pitching-change detection tied to it — keep tracking
+  // a still-live game through 1am, 2am, etc. without extra bookkeeping: the
+  // date being compared against just doesn't roll over yet. Only used for
+  // this dashboard's own "which slate am I on" logic — freshness checks
+  // against third-party pages that genuinely do change at real midnight
+  // (MLB.com's lineups page, the once-a-day leaderboard caches) intentionally
+  // keep using the raw calendar date instead.
+  const DAY_START_HOUR = 5; // 5:00 AM local time
+  function appToday() {
+    const d = new Date();
+    if (d.getHours() < DAY_START_HOUR) d.setDate(d.getDate() - 1);
+    return toISODate(d);
+  }
+
   function formatPretty(dateStr) {
     const d = parseISODate(dateStr);
     return d.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -6206,22 +6226,23 @@
     if (e.key === 'Escape') closeModal();
   });
 
-  datePicker.value = toISODate(new Date());
+  datePicker.value = appToday();
   loadDate(currentDate());
 
   // Every place that changes datePicker.value recomputes viewingToday right
-  // afterward, comparing against `new Date()` at that moment — this is the
-  // only place that comparison belongs. It's a one-time check of where the
-  // user just navigated TO, not a recurring check of whether time has since
-  // moved on (see viewingToday's declaration above for why that distinction
-  // matters at midnight).
+  // afterward, against appToday() (not the raw calendar date — see its
+  // declaration above) at that moment. This also means a reload of this tab
+  // in the middle of the night — the browser discarding a long-backgrounded
+  // tab, a laptop sleep/wake cycle, whatever — naturally lands back on the
+  // right date on its own: appToday() is a pure function of the current
+  // time, not something that has to be remembered across a reload.
   function syncViewingToday() {
-    viewingToday = (currentDate() === toISODate(new Date()));
+    viewingToday = (currentDate() === appToday());
   }
 
   datePicker.addEventListener('change', () => { syncViewingToday(); loadDate(currentDate()); });
   document.getElementById('todayBtn').addEventListener('click', () => {
-    datePicker.value = toISODate(new Date());
+    datePicker.value = appToday();
     syncViewingToday();
     loadDate(currentDate());
   });
